@@ -23,6 +23,7 @@ from toolrecap_v3.media import (
     SubprocessError,
     SubprocessTimeoutError,
     VideoStreamInfo,
+    calculate_auto_canvas,
     detect_gpu_encoder,
     find_binary,
     get_video_encode_args,
@@ -559,3 +560,190 @@ def test_encoder_usable_real_and_invalid() -> None:
     ffmpeg = find_binary("ffmpeg")
     assert probe_encoder_usable(ffmpeg, "libx264") is True
     assert probe_encoder_usable(ffmpeg, "invalid_nonexistent_encoder_xyz") is False
+
+
+# ============================================================================
+# 6. Auto Canvas Calculation Tests (DAR, SAR, Rotation, Even Dimensions)
+# ============================================================================
+
+
+def test_auto_canvas_dar_sar_rotation_even() -> None:
+    """Verify calculate_auto_canvas respects DAR, SAR, rotation, and guarantees even dimensions."""
+    dummy_path = Path("dummy.mp4")
+
+    # 1. DAR Anamorphic: 720x480 with DAR 16:9 -> 853.33 -> 853 -> rounded up to 854x480 (even)
+    v_dar = VideoStreamInfo(
+        index=0,
+        codec="h264",
+        width=720,
+        height=480,
+        fps=25.0,
+        fps_text="25/1",
+        duration=1.0,
+        aspect_ratio="3:2",
+        dar="16:9",
+        sar="32:27",
+    )
+    probe_dar = MediaProbeResult(
+        path=dummy_path,
+        duration=1.0,
+        container="mp4",
+        video_streams=(v_dar,),
+        audio_streams=(),
+        width=720,
+        height=480,
+        dar="16:9",
+        sar="32:27",
+        has_video=True,
+    )
+    w, h = calculate_auto_canvas(probe_dar)
+    assert (w, h) == (854, 480)
+    assert w % 2 == 0 and h % 2 == 0
+
+    # 2. SAR Anamorphic without DAR tag: 720x480 with SAR 32:27 -> 854x480
+    v_sar = VideoStreamInfo(
+        index=0,
+        codec="h264",
+        width=720,
+        height=480,
+        fps=25.0,
+        fps_text="25/1",
+        duration=1.0,
+        aspect_ratio="3:2",
+        dar="",
+        sar="32:27",
+    )
+    probe_sar = MediaProbeResult(
+        path=dummy_path,
+        duration=1.0,
+        container="mp4",
+        video_streams=(v_sar,),
+        audio_streams=(),
+        width=720,
+        height=480,
+        dar="",
+        sar="32:27",
+        has_video=True,
+    )
+    w, h = calculate_auto_canvas(probe_sar)
+    assert (w, h) == (854, 480)
+    assert w % 2 == 0 and h % 2 == 0
+
+    # 3. Rotation 90 degrees: 1920x1080 rot 90 -> 1080x1920
+    v_rot90 = VideoStreamInfo(
+        index=0,
+        codec="h264",
+        width=1920,
+        height=1080,
+        fps=30.0,
+        fps_text="30/1",
+        duration=1.0,
+        aspect_ratio="16:9",
+        rotation=90,
+    )
+    probe_rot90 = MediaProbeResult(
+        path=dummy_path,
+        duration=1.0,
+        container="mp4",
+        video_streams=(v_rot90,),
+        audio_streams=(),
+        width=1920,
+        height=1080,
+        has_video=True,
+    )
+    w, h = calculate_auto_canvas(probe_rot90)
+    assert (w, h) == (1080, 1920)
+    assert w % 2 == 0 and h % 2 == 0
+
+    # 4. Rotation 270 degrees: 1920x1080 rot 270 -> 1080x1920
+    v_rot270 = VideoStreamInfo(
+        index=0,
+        codec="h264",
+        width=1920,
+        height=1080,
+        fps=30.0,
+        fps_text="30/1",
+        duration=1.0,
+        aspect_ratio="16:9",
+        rotation=270,
+    )
+    probe_rot270 = MediaProbeResult(
+        path=dummy_path,
+        duration=1.0,
+        container="mp4",
+        video_streams=(v_rot270,),
+        audio_streams=(),
+        width=1920,
+        height=1080,
+        has_video=True,
+    )
+    w, h = calculate_auto_canvas(probe_rot270)
+    assert (w, h) == (1080, 1920)
+    assert w % 2 == 0 and h % 2 == 0
+
+    # 5. Rotation 90 with anamorphic: 720x480 with SAR 32:27 rot 90 -> (480, 854)
+    v_rot_anamorphic = VideoStreamInfo(
+        index=0,
+        codec="h264",
+        width=720,
+        height=480,
+        fps=25.0,
+        fps_text="25/1",
+        duration=1.0,
+        aspect_ratio="3:2",
+        sar="32:27",
+        rotation=90,
+    )
+    probe_rot_ana = MediaProbeResult(
+        path=dummy_path,
+        duration=1.0,
+        container="mp4",
+        video_streams=(v_rot_anamorphic,),
+        audio_streams=(),
+        width=720,
+        height=480,
+        sar="32:27",
+        has_video=True,
+    )
+    w, h = calculate_auto_canvas(probe_rot_ana)
+    assert (w, h) == (480, 854)
+    assert w % 2 == 0 and h % 2 == 0
+
+    # 6. Standard 640x480: returns (640, 480)
+    v_480p = VideoStreamInfo(
+        index=0,
+        codec="h264",
+        width=640,
+        height=480,
+        fps=25.0,
+        fps_text="25/1",
+        duration=1.0,
+        aspect_ratio="4:3",
+    )
+    probe_480p = MediaProbeResult(
+        path=dummy_path,
+        duration=1.0,
+        container="mp4",
+        video_streams=(v_480p,),
+        audio_streams=(),
+        width=640,
+        height=480,
+        has_video=True,
+    )
+    w, h = calculate_auto_canvas(probe_480p)
+    assert (w, h) == (640, 480)
+    assert w % 2 == 0 and h % 2 == 0
+
+    # 7. No video stream fallback with odd dimensions: rounds up to even
+    probe_no_video = MediaProbeResult(
+        path=dummy_path,
+        duration=0.0,
+        container="unknown",
+        video_streams=(),
+        audio_streams=(),
+        has_video=False,
+    )
+    w, h = calculate_auto_canvas(probe_no_video, fallback_w=1919, fallback_h=1079)
+    assert (w, h) == (1920, 1080)
+    assert w % 2 == 0 and h % 2 == 0
+

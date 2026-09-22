@@ -37,6 +37,7 @@ class AppSettings:
     canvas_width: int = 1920
     canvas_height: int = 1080
     canvas_fps: float = 30.0
+    canvas_auto: bool = True
     burn_subtitles: bool = False
     output_format: str = "mp4"
     output_dir: str = ""
@@ -79,6 +80,8 @@ class AppSettings:
     source_rights_status: str = "UNVERIFIED"
 
     def __post_init__(self) -> None:
+        if self.canvas_auto is None:
+            self.canvas_auto = True
         if self.gateway_sub_model and (not self.gateway_model or self.gateway_model == "sub"):
             self.gateway_model = self.gateway_sub_model
         elif self.gateway_model and not self.gateway_sub_model:
@@ -106,6 +109,9 @@ class AppSettings:
                 data_copy["gateway_sub_reasoning"] = "high"
             if "gateway_prime_reasoning" not in data_copy and data_copy["gateway_thinking"]:
                 data_copy["gateway_prime_reasoning"] = "high"
+        # Migrate old settings without canvas_auto to auto default
+        if "canvas_auto" not in data_copy or data_copy.get("canvas_auto") is None:
+            data_copy["canvas_auto"] = True
         allowed = cls.__dataclass_fields__
         filtered = {k: v for k, v in data_copy.items() if k in allowed}
         return cls(**filtered)

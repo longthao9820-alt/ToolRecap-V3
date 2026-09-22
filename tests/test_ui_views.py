@@ -13,6 +13,7 @@ if sys.platform == "win32":
         os.environ["TK_LIBRARY"] = tk_path
 
 import tkinter as tk
+import time
 from unittest.mock import MagicMock, patch
 import pytest
 
@@ -71,7 +72,7 @@ def test_main_window_init(tmp_path: Path):
 
 
 def test_main_window_source_controls(tmp_path: Path):
-    """Verify source list controls, table refresh, and clearing."""
+    """Verify source list controls, table refresh, async selection wait queue, and clearing."""
     persistence = ProjectPersistence(storage_root=tmp_path)
     app = MainWindow(persistence=persistence)
     try:
@@ -106,6 +107,30 @@ def test_main_window_source_controls(tmp_path: Path):
         app.update_idletasks()
         assert len(app.tree_sources.get_children()) == 0
         assert "Chưa chọn" in app.lbl_src_summary["text"]
+
+        # Adapt existing UI test for async selection with wait queue
+        sample_folder = tmp_path / "Season1"
+        sample_folder.mkdir()
+        (sample_folder / "Episode1.mp4").write_bytes(b"dummy1")
+        (sample_folder / "Episode2.mp4").write_bytes(b"dummy2")
+
+        app._load_folder(sample_folder)
+        start_t = time.time()
+        while time.time() - start_t < 3.0:
+            app._poll_queue()
+            app.update_idletasks()
+            if len(app.discovered_sources) == 2:
+                break
+            time.sleep(0.02)
+
+        assert len(app.discovered_sources) == 2
+        assert len(app.tree_sources.get_children()) == 2
+        assert "2 video" in app.lbl_src_summary["text"]
+
+        app._on_clear_sources()
+        app.update_idletasks()
+        assert len(app.discovered_sources) == 0
+        assert len(app.tree_sources.get_children()) == 0
     finally:
         app.destroy()
 
@@ -269,24 +294,32 @@ def test_settings_dialog_masked_secrets_and_validation(tmp_path: Path):
             mock_err.assert_called_once()
             assert "bắt đầu bằng" in mock_err.call_args[0][1]
 
-        # Fix URL and set invalid canvas
+        # Fix URL and set invalid FPS
         dialog.var_gw_endpoint.set("http://localhost:8000")
-        dialog.var_canvas_w.set(501)  # Odd number
+        dialog.var_canvas_fps.set(0)
         with patch("toolrecap_v3.ui.settings_dialog.messagebox.showerror") as mock_err:
             dialog._on_save()
             mock_err.assert_called_once()
-            assert "số chẵn" in mock_err.call_args[0][1]
+            assert "FPS" in mock_err.call_args[0][1]
 
-        # Fix canvas and save valid
-        dialog.var_canvas_w.set(1920)
-        dialog.var_canvas_h.set(1080)
+        # Verify canvas auto label is present and width/height entry widgets removed
+        assert hasattr(dialog, "lbl_canvas_auto")
+        assert "Tự động" in dialog.lbl_canvas_auto.cget("text")
+
+        # Verify voice combobox has human-readable names and resolves to voice ID on save
+        assert "Documentarian — Nam — ToolRecap Local" in dialog.cmb_voice_id["values"]
+        dialog.var_voice_id.set("Documentarian — Nam — ToolRecap Local")
+
+        # Fix FPS and save valid
+        dialog.var_canvas_fps.set(30.0)
         dialog._on_save()
 
         # Ensure settings were saved
         mgr = SettingsManager(persistence=persistence)
         loaded = mgr.load()
         assert loaded.gateway_endpoint == "http://localhost:8000"
-        assert loaded.canvas_width == 1920
+        assert loaded.canvas_auto is True
+        assert loaded.voice_id == "voicestudio.en.documentarian"
 
         # Ensure secret was preserved in DPAPI and not leaked
         assert secret_store.get_secret("gateway_api_key") == "secret-gw-key-1234"

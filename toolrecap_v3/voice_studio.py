@@ -30,6 +30,156 @@ from toolrecap_v3.errors import (
 
 TRANSIENT_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 
+# Official 12 designed voice archetypes from ToolRecap V2 (VoiceStudio v0.5.3 backend/core/archetypes.py)
+V2_VOICE_PRESETS: Dict[str, Dict[str, Any]] = {
+    "voicestudio.en.neighbor": {
+        "voice_id": "voicestudio.en.neighbor",
+        "name": "Neighbor",
+        "display_name": "Neighbor — Nữ — ToolRecap Local",
+        "gender": "Female",
+        "language": "en-US",
+        "description": "Film recap / Storytelling",
+        "style": "film_recap",
+        "instruct": "female, young adult, moderate pitch, american accent",
+    },
+    "voicestudio.en.companion": {
+        "voice_id": "voicestudio.en.companion",
+        "name": "Companion",
+        "display_name": "Companion — Nữ — ToolRecap Local",
+        "gender": "Female",
+        "language": "en-US",
+        "description": "Film recap / Storytelling",
+        "style": "film_recap",
+        "instruct": "female, middle-aged, moderate pitch, canadian accent",
+    },
+    "voicestudio.en.teacher": {
+        "voice_id": "voicestudio.en.teacher",
+        "name": "Teacher",
+        "display_name": "Teacher — Nữ — ToolRecap Local",
+        "gender": "Female",
+        "language": "en-US",
+        "description": "Film recap / Storytelling",
+        "style": "film_recap",
+        "instruct": "female, middle-aged, moderate pitch, american accent",
+    },
+    "voicestudio.en.anchor": {
+        "voice_id": "voicestudio.en.anchor",
+        "name": "Anchor",
+        "display_name": "Anchor — Nam — ToolRecap Local",
+        "gender": "Male",
+        "language": "en-US",
+        "description": "Documentary / News",
+        "style": "documentary",
+        "instruct": "male, middle-aged, moderate pitch, american accent",
+    },
+    "voicestudio.en.documentarian": {
+        "voice_id": "voicestudio.en.documentarian",
+        "name": "Documentarian",
+        "display_name": "Documentarian — Nam — ToolRecap Local",
+        "gender": "Male",
+        "language": "en-US",
+        "description": "Documentary / Recap (Default US)",
+        "style": "documentary",
+        "instruct": "male, middle-aged, low pitch, american accent",
+    },
+    "voicestudio.en.promo": {
+        "voice_id": "voicestudio.en.promo",
+        "name": "Promo",
+        "display_name": "Promo — Nam — ToolRecap Local",
+        "gender": "Male",
+        "language": "en-US",
+        "description": "Energetic / Trailer",
+        "style": "energetic",
+        "instruct": "male, middle-aged, low pitch",
+    },
+    "voicestudio.en.librarian": {
+        "voice_id": "voicestudio.en.librarian",
+        "name": "Librarian",
+        "display_name": "Librarian — Nữ — ToolRecap Local",
+        "gender": "Female",
+        "language": "en-GB",
+        "description": "Storytelling / Drama",
+        "style": "storytelling",
+        "instruct": "female, middle-aged, low pitch, british accent",
+    },
+    "voicestudio.en.podcaster": {
+        "voice_id": "voicestudio.en.podcaster",
+        "name": "Podcaster",
+        "display_name": "Podcaster — Nữ — ToolRecap Local",
+        "gender": "Female",
+        "language": "en-GB",
+        "description": "Narrative / Conversation",
+        "style": "storytelling",
+        "instruct": "female, young adult, high pitch, australian accent",
+    },
+    "voicestudio.en.luxe": {
+        "voice_id": "voicestudio.en.luxe",
+        "name": "Luxe",
+        "display_name": "Luxe — Nữ — ToolRecap Local",
+        "gender": "Female",
+        "language": "en-GB",
+        "description": "Emotional / Drama",
+        "style": "drama",
+        "instruct": "female, middle-aged, moderate pitch, british accent",
+    },
+    "voicestudio.en.storyteller": {
+        "voice_id": "voicestudio.en.storyteller",
+        "name": "Storyteller",
+        "display_name": "Storyteller — Nam — ToolRecap Local",
+        "gender": "Male",
+        "language": "en-GB",
+        "description": "Storytelling / Drama",
+        "style": "storytelling",
+        "instruct": "male, elderly, low pitch, british accent",
+    },
+    "voicestudio.en.commentator": {
+        "voice_id": "voicestudio.en.commentator",
+        "name": "Commentator",
+        "display_name": "Commentator — Nam — ToolRecap Local",
+        "gender": "Male",
+        "language": "en-GB",
+        "description": "Commentary / Recap (Default UK)",
+        "style": "storytelling",
+        "instruct": "male, middle-aged, high pitch, british accent",
+    },
+    "voicestudio.en.explainer": {
+        "voice_id": "voicestudio.en.explainer",
+        "name": "Explainer",
+        "display_name": "Explainer — Nam — ToolRecap Local",
+        "gender": "Male",
+        "language": "en-GB",
+        "description": "Documentary / Explainer",
+        "style": "documentary",
+        "instruct": "male, young adult, moderate pitch, british accent",
+    },
+}
+
+DEFAULT_V2_VOICE_ID = "voicestudio.en.documentarian"
+
+
+def get_v2_voice_presets() -> Dict[str, Dict[str, Any]]:
+    """Return immutable copy of supported ToolRecap V2 voice presets."""
+    return dict(V2_VOICE_PRESETS)
+
+
+def get_voice_display_name(voice_id: str) -> str:
+    """Return human-readable display name for a voice ID, or the voice ID itself if unmapped."""
+    if voice_id in V2_VOICE_PRESETS:
+        return V2_VOICE_PRESETS[voice_id].get("display_name", voice_id)
+    return voice_id
+
+
+def resolve_voice_id(display_or_id: str) -> str:
+    """Resolve human-readable display name or name back to stored voice ID."""
+    if not display_or_id:
+        return ""
+    if display_or_id in V2_VOICE_PRESETS:
+        return display_or_id
+    for vid, p in V2_VOICE_PRESETS.items():
+        if p.get("display_name") == display_or_id or p.get("name") == display_or_id:
+            return vid
+    return display_or_id
+
 
 def sanitize_message(msg: str, secrets: Optional[List[Optional[str]]] = None) -> str:
     """Redact secrets from error messages to prevent credential leakage."""
@@ -251,12 +401,15 @@ class VoiceStudioAdapter:
         language: str = "en",
         response_format: str = "wav",
         style: Optional[str] = None,
+        instruct: Optional[str] = None,
         cancellation_token: Optional[CancellationToken] = None,
     ) -> bytes:
         """Synthesize text into WAV audio using the resolved VoiceStudio endpoint.
         
         Invariants:
         - Auto resolution happens ONCE before synthesis. No engine or target fallback during/after.
+        - Exact V2 voice presets map to real matching profile/instruct definitions, never rename to alloy.
+        - Unavailable legacy/old voices raise VoiceStudioUnavailableError (exact blocker, no fake aliases).
         - Validates returned bytes as valid WAV with non-zero duration. Rejects invalid audio.
         - Retries only transient errors with bounded count.
         - Cancellation immediately aborts request and raises CancelledError.
@@ -268,6 +421,25 @@ class VoiceStudioAdapter:
         if cancellation_token:
             cancellation_token.check_cancelled()
 
+        # Resolve voice preset mapping (No silent Piper mapping; exact V2 presets or error)
+        preset = V2_VOICE_PRESETS.get(voice)
+
+        target_voice = voice
+        target_instruct = instruct
+        target_description = style
+
+        if preset:
+            # Map exact V2 preset definition to real instruct/description
+            target_instruct = instruct or preset["instruct"]
+            target_description = style or preset["description"]
+            # For VoiceStudio server with OmniVoice engine, passing voice="default"
+            # with instruct invokes the exact archetype instruction.
+            target_voice = "default"
+        elif voice.startswith(("voicestudio.", "piper.")):
+            raise VoiceStudioUnavailableError(
+                f"Requested voice '{voice}' is unavailable in VoiceStudio or V2 presets."
+            )
+
         # Step 1: Resolve endpoint strictly before synthesis
         target_url, is_remote = self._resolve_target()
         speech_url = f"{target_url}/v1/audio/speech"
@@ -275,12 +447,14 @@ class VoiceStudioAdapter:
         payload: Dict[str, Any] = {
             "model": model,
             "input": input_text,
-            "voice": voice,
+            "voice": target_voice,
             "response_format": response_format,
             "language": language,
         }
-        if style:
-            payload["description"] = style
+        if target_instruct:
+            payload["instruct"] = target_instruct
+        if target_description:
+            payload["description"] = target_description
 
         # Step 2: Bounded retry loop for transient errors
         last_exception: Optional[Exception] = None

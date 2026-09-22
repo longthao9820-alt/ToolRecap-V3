@@ -31,7 +31,14 @@ from toolrecap_v3.secrets import DPAPISecretStore
 from toolrecap_v3.settings import AppSettings, SettingsManager
 from toolrecap_v3.ui.notifications import WindowsNotificationService
 from toolrecap_v3.updater import UpdateCheckResult, UpdateManager
-from toolrecap_v3.voice_studio import VoiceStudioAdapter
+from toolrecap_v3.voice_studio import (
+    DEFAULT_V2_VOICE_ID,
+    V2_VOICE_PRESETS,
+    VoiceStudioAdapter,
+    get_v2_voice_presets,
+    get_voice_display_name,
+    resolve_voice_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -207,7 +214,8 @@ class SettingsDialog(tk.Toplevel):
         self.var_voice_remote = tk.StringVar(value=val.voice_remote_url)
         self.var_voice_key = tk.StringVar()
         self.var_voice_key_visible = tk.BooleanVar(value=False)
-        self.var_voice_id = tk.StringVar(value=val.voice_id)
+        raw_voice = val.voice_id or DEFAULT_V2_VOICE_ID
+        self.var_voice_id = tk.StringVar(value=get_voice_display_name(raw_voice) if raw_voice else "")
         self.var_voice_lang = tk.StringVar(value=val.voice_language)
         self.var_voice_style = tk.StringVar(value=val.voice_style)
         self.voice_status_var = tk.StringVar(value="")
@@ -228,6 +236,7 @@ class SettingsDialog(tk.Toplevel):
         self.var_canvas_w = tk.IntVar(value=val.canvas_width)
         self.var_canvas_h = tk.IntVar(value=val.canvas_height)
         self.var_canvas_fps = tk.DoubleVar(value=val.canvas_fps)
+        self.var_canvas_auto = tk.BooleanVar(value=True)
         self.var_burn_subs = tk.BooleanVar(value=val.burn_subtitles)
         self.var_out_format = tk.StringVar(value=val.output_format)
 
@@ -282,6 +291,9 @@ class SettingsDialog(tk.Toplevel):
         else:
             self.var_voice_key.set("")
             self._had_vs_key = False
+
+        raw_voice = self.settings.voice_id or DEFAULT_V2_VOICE_ID
+        self.var_voice_id.set(get_voice_display_name(raw_voice) if raw_voice else "")
 
         self.txt_prompt.delete("1.0", tk.END)
         self.txt_prompt.insert("1.0", self.settings.prompt)
@@ -763,12 +775,15 @@ class SettingsDialog(tk.Toplevel):
         self.chk_show_vs.grid(row=row, column=2, sticky="w")
         row += 1
 
-        # Voice selection
+        # Voice selection (All 12 V2 presets + backend aliases, displayed with human-readable names)
         ttk.Label(p, text="Tên giọng đọc (Voice ID):", font=("Segoe UI", 9, "bold")).grid(row=row, column=0, sticky="w", pady=4)
+        v2_voice_ids = list(V2_VOICE_PRESETS.keys())
+        initial_voices = v2_voice_ids + ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
+        initial_display_voices = [get_voice_display_name(vid) for vid in initial_voices]
         self.cmb_voice_id = ttk.Combobox(
             p,
             textvariable=self.var_voice_id,
-            values=["alloy", "echo", "fable", "onyx", "nova", "shimmer"],
+            values=initial_display_voices,
         )
         self.cmb_voice_id.grid(row=row, column=1, sticky="ew", padx=(10, 6), pady=4)
         self.cbo_voice = self.cmb_voice_id
@@ -960,9 +975,10 @@ class SettingsDialog(tk.Toplevel):
                     elif isinstance(v, str):
                         voice_ids.append(v)
                 if voice_ids:
+                    display_names = [get_voice_display_name(vid) for vid in voice_ids]
                     self.after(0, lambda: (
-                        self.cmb_voice_id.config(values=voice_ids),
-                        self.voice_status_var.set(f"✓ Đã tải {len(voice_ids)} giọng đọc."),
+                        self.cmb_voice_id.config(values=display_names),
+                        self.voice_status_var.set(f"✓ Đã tải {len(display_names)} giọng đọc."),
                         self.lbl_voice_status.config(foreground="#16A34A"),
                     ))
                 else:
@@ -979,7 +995,8 @@ class SettingsDialog(tk.Toplevel):
         threading.Thread(target=_do_fetch, daemon=True).start()
 
     def _preview_voice(self) -> None:
-        voice = self.var_voice_id.get().strip() or "alloy"
+        raw_val = self.var_voice_id.get().strip()
+        voice = resolve_voice_id(raw_val) or "alloy"
         lang = self.var_voice_lang.get().strip() or "en-US"
         style = self.var_voice_style.get().strip()
 
@@ -1103,15 +1120,21 @@ class SettingsDialog(tk.Toplevel):
         ).grid(row=row, column=1, sticky="ew", padx=(10, 0), pady=5)
         row += 1
 
-        # Resolution / Canvas
+        # Resolution / Canvas (Auto from source video)
         ttk.Label(p, text="Độ phân giải khung hình:").grid(row=row, column=0, sticky="w", pady=5)
         f_res = ttk.Frame(p)
         f_res.grid(row=row, column=1, columnspan=2, sticky="w", padx=(10, 0), pady=5)
-        ttk.Entry(f_res, textvariable=self.var_canvas_w, width=7).pack(side="left")
-        ttk.Label(f_res, text=" x ").pack(side="left")
-        ttk.Entry(f_res, textvariable=self.var_canvas_h, width=7).pack(side="left")
-        ttk.Label(f_res, text=" @ ").pack(side="left")
-        ttk.Entry(f_res, textvariable=self.var_canvas_fps, width=6).pack(side="left")
+        self.lbl_canvas_auto = ttk.Label(
+            f_res,
+            text="Tự động theo video nguồn (Khung hình chuẩn chẵn)",
+            font=("Segoe UI", 9, "bold"),
+            foreground="#1E40AF",
+        )
+        self.lbl_canvas_auto.pack(side="left")
+        self.canvas_auto_label = self.lbl_canvas_auto
+        ttk.Label(f_res, text="   @   ").pack(side="left")
+        self.ent_canvas_fps = ttk.Entry(f_res, textvariable=self.var_canvas_fps, width=6)
+        self.ent_canvas_fps.pack(side="left")
         ttk.Label(f_res, text=" FPS").pack(side="left")
         row += 1
 
@@ -1364,14 +1387,6 @@ class SettingsDialog(tk.Toplevel):
             if not (-20.0 <= true_peak <= 0.0):
                 raise ValueError("Mức đỉnh thực True peak phải nằm trong khoảng từ -20.0 đến 0.0 dBTP.")
 
-            canvas_w = int(self.var_canvas_w.get())
-            if not (320 <= canvas_w <= 7680) or canvas_w % 2 != 0:
-                raise ValueError("Chiều rộng khung hình phải là số chẵn từ 320 đến 7680.")
-
-            canvas_h = int(self.var_canvas_h.get())
-            if not (240 <= canvas_h <= 4320) or canvas_h % 2 != 0:
-                raise ValueError("Chiều cao khung hình phải là số chẵn từ 240 đến 4320.")
-
             canvas_fps = float(self.var_canvas_fps.get())
             if not (1.0 <= canvas_fps <= 120.0):
                 raise ValueError("Tốc độ khung hình FPS phải nằm trong khoảng từ 1.0 đến 120.0.")
@@ -1394,7 +1409,8 @@ class SettingsDialog(tk.Toplevel):
             self.settings.voice_mode = self.var_voice_mode.get().strip()
             self.settings.voice_local_url = vs_local
             self.settings.voice_remote_url = vs_remote
-            self.settings.voice_id = self.var_voice_id.get().strip()
+            raw_voice_choice = self.var_voice_id.get().strip()
+            self.settings.voice_id = resolve_voice_id(raw_voice_choice)
             self.settings.voice_language = self.var_voice_lang.get().strip()
             self.settings.voice_style = self.var_voice_style.get().strip()
 
@@ -1409,8 +1425,10 @@ class SettingsDialog(tk.Toplevel):
             self.settings.use_gpu = bool(self.var_use_gpu.get())
             self.settings.quality = self.var_quality.get().strip()
             self.settings.video_codec = self.var_codec.get().strip()
-            self.settings.canvas_width = canvas_w
-            self.settings.canvas_height = canvas_h
+            self.settings.canvas_auto = True
+            self.var_canvas_auto.set(True)
+            self.settings.canvas_width = int(self.var_canvas_w.get()) if hasattr(self, "var_canvas_w") and self.var_canvas_w.get() else 1920
+            self.settings.canvas_height = int(self.var_canvas_h.get()) if hasattr(self, "var_canvas_h") and self.var_canvas_h.get() else 1080
             self.settings.canvas_fps = canvas_fps
             self.settings.burn_subtitles = bool(self.var_burn_subs.get())
             self.settings.output_format = self.var_out_format.get().strip()

@@ -254,6 +254,8 @@ class VideoStreamInfo:
     aspect_ratio: str
     rotation: int = 0
     bitrate: int | None = None
+    sar: str = ""
+    dar: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -291,6 +293,8 @@ class MediaProbeResult:
     height: int = 0
     fps: float = 0.0
     aspect_ratio: str = ""
+    sar: str = ""
+    dar: str = ""
     has_video: bool = False
     has_audio: bool = False
 
@@ -303,6 +307,8 @@ class MediaProbeResult:
             "height": self.height,
             "fps": self.fps,
             "aspect_ratio": self.aspect_ratio,
+            "sar": self.sar,
+            "dar": self.dar,
             "has_video": self.has_video,
             "has_audio": self.has_audio,
             "video_streams": [s.to_dict() for s in self.video_streams],
@@ -390,6 +396,8 @@ def probe_media(
             ar = calculate_aspect_ratio(w, h)
             rot = _parse_rotation(s)
             bitrate = int(s["bit_rate"]) if "bit_rate" in s and str(s["bit_rate"]).isdigit() else None
+            sar = str(s.get("sample_aspect_ratio") or "")
+            dar = str(s.get("display_aspect_ratio") or "")
             video_streams_list.append(
                 VideoStreamInfo(
                     index=stream_index,
@@ -402,6 +410,8 @@ def probe_media(
                     aspect_ratio=ar,
                     rotation=rot,
                     bitrate=bitrate,
+                    sar=sar,
+                    dar=dar,
                 )
             )
         elif codec_type == "audio":
@@ -433,6 +443,8 @@ def probe_media(
     primary_h = video_streams_list[0].height if video_streams_list else 0
     primary_fps = video_streams_list[0].fps if video_streams_list else 0.0
     primary_ar = video_streams_list[0].aspect_ratio if video_streams_list else ""
+    primary_sar = video_streams_list[0].sar if video_streams_list else ""
+    primary_dar = video_streams_list[0].dar if video_streams_list else ""
 
     if duration <= 0.0 and video_streams_list:
         duration = video_streams_list[0].duration
@@ -449,9 +461,84 @@ def probe_media(
         height=primary_h,
         fps=primary_fps,
         aspect_ratio=primary_ar,
+        sar=primary_sar,
+        dar=primary_dar,
         has_video=len(video_streams_list) > 0,
         has_audio=len(audio_streams_list) > 0,
     )
+
+
+def calculate_auto_canvas(
+    probe: MediaProbeResult,
+    fallback_w: int = 1920,
+    fallback_h: int = 1080,
+) -> tuple[int, int]:
+    """Calculate auto canvas dimensions from media probe.
+    
+    Invariants:
+    - Accounts for DAR (Display Aspect Ratio) and non-square pixels (SAR) for square pixels.
+    - Accounts for stream rotation (90/270 degrees swap width and height).
+    - Guarantees even dimensions (divisible by 2) for H.264/yuv420p encoding.
+    - Fallback to fallback_w/h if probe has no valid video.
+    """
+    if not probe.has_video or not probe.video_streams:
+        w = fallback_w + (fallback_w % 2)
+        h = fallback_h + (fallback_h % 2)
+        return w, h
+
+    v_stream = probe.video_streams[0]
+    w = v_stream.width
+    h = v_stream.height
+    if w <= 0 or h <= 0:
+        w = fallback_w + (fallback_w % 2)
+        h = fallback_h + (fallback_h % 2)
+        return w, h
+
+    # 1. Square-pixel normalization from DAR or SAR
+    dar = v_stream.dar or probe.dar
+    sar = v_stream.sar or probe.sar
+    w_disp = float(w)
+    h_disp = float(h)
+
+    if dar and dar not in ("0:1", "0/1", "unknown"):
+        sep = "/" if "/" in dar else (":" if ":" in dar else None)
+        if sep:
+            try:
+                num_s, den_s = dar.split(sep, 1)
+                num, den = float(num_s), float(den_s)
+                if num > 0 and den > 0:
+                    dar_val = num / den
+                    w_disp = round(h_disp * dar_val)
+            except (ValueError, ZeroDivisionError):
+                pass
+    elif sar and sar not in ("0:1", "0/1", "1:1", "1/1", "unknown"):
+        sep = "/" if "/" in sar else (":" if ":" in sar else None)
+        if sep:
+            try:
+                num_s, den_s = sar.split(sep, 1)
+                num, den = float(num_s), float(den_s)
+                if num > 0 and den > 0:
+                    sar_val = num / den
+                    w_disp = round(w_disp * sar_val)
+            except (ValueError, ZeroDivisionError):
+                pass
+
+    # 2. Rotation handling (90 and 270 degrees swap width and height)
+    rot = v_stream.rotation % 360
+    if rot in (90, 270):
+        canvas_w = int(round(h_disp))
+        canvas_h = int(round(w_disp))
+    else:
+        canvas_w = int(round(w_disp))
+        canvas_h = int(round(h_disp))
+
+    # 3. Even dimensions for H.264 / yuv420p
+    if canvas_w % 2 != 0:
+        canvas_w += 1
+    if canvas_h % 2 != 0:
+        canvas_h += 1
+
+    return canvas_w, canvas_h
 
 
 def probe_duration(

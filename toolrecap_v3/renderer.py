@@ -44,6 +44,7 @@ from toolrecap_v3.errors import (
 from toolrecap_v3.media import (
     EncoderStatus,
     MediaProbeResult,
+    calculate_auto_canvas,
     detect_gpu_encoder,
     find_binary,
     get_video_encode_args,
@@ -298,12 +299,23 @@ def render_output(
         probes[name] = probe_media(path, cancellation_token=cancellation_token)
 
     # Canvas dimensions and FPS (guarantee even numbers for H.264/yuv420p)
-    canvas_w = int(cfg.canvas_width)
-    canvas_h = int(cfg.canvas_height)
-    if canvas_w % 2 != 0:
-        canvas_w += 1
-    if canvas_h % 2 != 0:
-        canvas_h += 1
+    first_seg = segments[0]
+    first_src_name = first_seg["source_file"]
+    first_probe = probes[first_src_name]
+
+    if getattr(cfg, "canvas_auto", True):
+        canvas_w, canvas_h = calculate_auto_canvas(
+            first_probe,
+            fallback_w=int(cfg.canvas_width),
+            fallback_h=int(cfg.canvas_height),
+        )
+    else:
+        canvas_w = int(cfg.canvas_width)
+        canvas_h = int(cfg.canvas_height)
+        if canvas_w % 2 != 0:
+            canvas_w += 1
+        if canvas_h % 2 != 0:
+            canvas_h += 1
     canvas_fps = float(cfg.canvas_fps)
 
     # Prepare isolated temporary working directory in LOCALAPPDATA/ToolRecapV3/render-work
@@ -439,8 +451,9 @@ def render_output(
                 input_count += 1
 
             # Video filter: aspect-fit into canvas, pad borders, set FPS and yuv420p
+            # Normalize anamorphic pixels to square pixels via ih*dar before aspect-fit scale
             v_filter = (
-                f"[0:v]scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+                f"[0:v]scale=ih*dar:ih,scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
                 f"pad={canvas_w}:{canvas_h}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,"
                 f"fps={canvas_fps},format=yuv420p,"
                 f"trim=0:{seg_dur_s:.6f},setpts=PTS-STARTPTS[vout]"

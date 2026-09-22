@@ -20,7 +20,20 @@ import threading
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 from toolrecap_v3.cancellation import CancellationToken
-from toolrecap_v3.errors import CancelledError, ToolRecapError
+from toolrecap_v3.discovery import (
+    SUPPORTED_EXTENSIONS,
+    SourceFingerprint,
+    compute_file_fingerprint,
+    discover_sources,
+    is_windows_reserved_stem,
+)
+from toolrecap_v3.errors import (
+    CancelledError,
+    DiscoveryError,
+    ToolRecapError,
+    WindowsCollisionError,
+    WindowsReservedNameError,
+)
 from toolrecap_v3.gateway import GatewayClient, sanitize_message as gw_sanitize
 from toolrecap_v3.persistence import ProjectPersistence
 from toolrecap_v3.secrets import DPAPISecretStore
@@ -73,6 +86,159 @@ def format_clean_error(exc: Exception, secrets: Optional[List[str]] = None) -> s
         return f"Lỗi xác thực bảo mật Windows DPAPI: {msg}"
 
     return msg
+
+
+class SourceDiscoveryWorker:
+    """Manages background discovery of source files and folders with thread-safe queue dispatching.
+
+    Invariants:
+    - Dedicated daemon thread per discovery operation.
+    - Zero Tkinter or GUI calls from worker thread.
+    - Thread-safe communication exclusively via queue.Queue.
+    - Token-based generation guard against stale / out-of-order results.
+    - Cancellation stops discovery without hanging.
+    - Fast stat-only probing without computing full movie sha256.
+    """
+
+    def __init__(self, msg_queue: Optional[queue.Queue[WorkerMessage]] = None) -> None:
+        self.queue: queue.Queue[WorkerMessage] = msg_queue or queue.Queue()
+        self._thread: Optional[threading.Thread] = None
+        self._cancellation_token: Optional[CancellationToken] = None
+        self._active_token_id: int = 0
+        self._lock = threading.Lock()
+        self._is_running = False
+
+    @property
+    def is_running(self) -> bool:
+        """Check if a discovery thread is currently running."""
+        with self._lock:
+            return self._is_running and self._thread is not None and self._thread.is_alive()
+
+    @property
+    def active_token_id(self) -> int:
+        """Return the current active generation token ID."""
+        with self._lock:
+            return self._active_token_id
+
+    def cancel(self) -> None:
+        """Request cooperative cancellation of current discovery task."""
+        with self._lock:
+            if self._cancellation_token:
+                self._cancellation_token.cancel()
+
+    def wait_until_idle(self, timeout: float = 2.0) -> bool:
+        """Wait for active discovery thread to finish (useful in tests)."""
+        t = None
+        with self._lock:
+            t = self._thread
+        if t and t.is_alive():
+            t.join(timeout=timeout)
+            return not t.is_alive()
+        return True
+
+    def start_discovery(self, path: Union[str, Path], is_folder: bool) -> int:
+        """Launch discovery for file or folder in background thread.
+
+        Returns generation token ID. Cancels any previously active discovery.
+        """
+        with self._lock:
+            if self._cancellation_token:
+                self._cancellation_token.cancel()
+            self._active_token_id += 1
+            token_id = self._active_token_id
+            token = CancellationToken()
+            self._cancellation_token = token
+            self._is_running = True
+
+        p = Path(path).resolve()
+
+        def _worker_target() -> None:
+            try:
+                if token.is_cancelled:
+                    raise CancelledError("Discovery cancelled before start.")
+
+                if is_folder:
+                    def _progress(cur: int, tot: int) -> None:
+                        if not token.is_cancelled:
+                            self.queue.put(
+                                WorkerMessage(
+                                    kind="discovery_progress",
+                                    data={
+                                        "token": token_id,
+                                        "current": cur,
+                                        "total": tot,
+                                        "path": str(p),
+                                        "name": p.name,
+                                    },
+                                )
+                            )
+
+                    fps = discover_sources(
+                        p,
+                        cancellation_token=token,
+                        compute_hash=False,
+                        progress_callback=_progress,
+                    )
+                    if not token.is_cancelled:
+                        self.queue.put(
+                            WorkerMessage(
+                                kind="discovery_completed",
+                                data={
+                                    "token": token_id,
+                                    "kind": "folder",
+                                    "path": str(p),
+                                    "name": p.name,
+                                    "sources": fps,
+                                },
+                            )
+                        )
+                else:
+                    if not p.exists():
+                        raise DiscoveryError(f"File video không tồn tại: {p.name}")
+                    if not p.is_file():
+                        raise DiscoveryError(f"Đường dẫn không phải tệp: {p.name}")
+
+                    ext = p.suffix.lower()
+                    if ext not in SUPPORTED_EXTENSIONS:
+                        raise DiscoveryError(f"Định dạng video không được hỗ trợ: '{ext}' ({p.name})")
+                    if is_windows_reserved_stem(p.stem):
+                        raise WindowsReservedNameError(f"Tên tệp sử dụng tên bảo lưu của Windows: {p.name}")
+
+                    fp = compute_file_fingerprint(p, cancellation_token=token, compute_hash=False)
+                    if not token.is_cancelled:
+                        self.queue.put(
+                            WorkerMessage(
+                                kind="discovery_completed",
+                                data={
+                                    "token": token_id,
+                                    "kind": "file",
+                                    "path": str(p),
+                                    "name": p.name,
+                                    "sources": [fp],
+                                },
+                            )
+                        )
+            except CancelledError:
+                self.queue.put(
+                    WorkerMessage(kind="discovery_cancelled", data={"token": token_id})
+                )
+            except Exception as exc:
+                if not token.is_cancelled:
+                    clean_err = format_clean_error(exc)
+                    self.queue.put(
+                        WorkerMessage(
+                            kind="discovery_failed",
+                            data={"token": token_id, "error": clean_err, "path": str(p), "name": p.name},
+                        )
+                    )
+            finally:
+                with self._lock:
+                    if self._active_token_id == token_id:
+                        self._is_running = False
+
+        self._thread = threading.Thread(target=_worker_target, daemon=True, name="DiscoveryWorkerThread")
+        self._thread.start()
+        return token_id
 
 
 class WorkflowWorker:
@@ -149,12 +315,12 @@ class WorkflowWorker:
             if self._is_running:
                 raise RuntimeError("Một tác vụ đang được thực hiện. Vui lòng chờ hoặc bấm Dừng trước khi bắt đầu tác vụ mới.")
             self._is_running = True
-            self._cancellation_token = CancellationToken()
+            token = CancellationToken()
+            self._cancellation_token = token
 
         cfg = settings or self.settings_manager.load()
 
         def _worker_target() -> None:
-            token = self._cancellation_token
             try:
                 self._put_message("log", f"Bắt đầu khởi tạo dự án '{project_name}' ({project_id})...")
                 wf = self._create_workflow(cfg)
@@ -215,12 +381,12 @@ class WorkflowWorker:
             if self._is_running:
                 raise RuntimeError("Một tác vụ đang được thực hiện. Vui lòng chờ hoặc bấm Dừng.")
             self._is_running = True
-            self._cancellation_token = CancellationToken()
+            token = CancellationToken()
+            self._cancellation_token = token
 
         cfg = settings or self.settings_manager.load()
 
         def _worker_target() -> None:
-            token = self._cancellation_token
             try:
                 self._put_message("log", f"Tiếp tục thực hiện dự án '{project_id}'...")
                 wf = self._create_workflow(cfg)
@@ -267,12 +433,12 @@ class WorkflowWorker:
             if self._is_running:
                 raise RuntimeError("Một tác vụ đang được thực hiện. Vui lòng chờ hoặc bấm Dừng.")
             self._is_running = True
-            self._cancellation_token = CancellationToken()
+            token = CancellationToken()
+            self._cancellation_token = token
 
         cfg = settings or self.settings_manager.load()
 
         def _worker_target() -> None:
-            token = self._cancellation_token
             try:
                 self._put_message("log", f"Nhập kịch bản JSON có sẵn cho dự án '{project_name}' (0 yêu cầu AI)...")
                 wf = self._create_workflow(cfg)

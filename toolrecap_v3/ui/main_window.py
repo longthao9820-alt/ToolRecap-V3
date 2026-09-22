@@ -71,7 +71,7 @@ from toolrecap_v3.persistence import ProjectPersistence, read_json
 from toolrecap_v3.settings import AppSettings, SettingsManager
 from toolrecap_v3.ui.notifications import WindowsNotificationService
 from toolrecap_v3.ui.settings_dialog import SettingsDialog
-from toolrecap_v3.ui.worker import WorkerMessage, WorkflowWorker
+from toolrecap_v3.ui.worker import SourceDiscoveryWorker, WorkerMessage, WorkflowWorker
 from toolrecap_v3.workflow import OutputStatus, ProjectStatus
 
 logger = logging.getLogger(__name__)
@@ -119,6 +119,8 @@ def safe_after(widget: tk.Misc | None, ms: int, func: Callable, *args: Any) -> s
 
     def _wrapped() -> None:
         try:
+            if hasattr(widget, "_is_closed") and getattr(widget, "_is_closed", False):
+                return
             if hasattr(widget, "winfo_exists") and not widget.winfo_exists():
                 return
             func(*args)
@@ -128,6 +130,8 @@ def safe_after(widget: tk.Misc | None, ms: int, func: Callable, *args: Any) -> s
             pass
 
     try:
+        if hasattr(widget, "_is_closed") and getattr(widget, "_is_closed", False):
+            return None
         if hasattr(widget, "winfo_exists") and not widget.winfo_exists():
             return None
         return widget.after(ms, _wrapped)
@@ -251,6 +255,15 @@ class NotificationBanner(ttk.Frame):
             except Exception:
                 pass
 
+    def destroy(self) -> None:
+        if self._auto_dismiss_job:
+            try:
+                self.after_cancel(self._auto_dismiss_job)
+            except Exception:
+                pass
+            self._auto_dismiss_job = None
+        super().destroy()
+
 
 class MainWindow(tk.Tk):
     """Main desktop application window for ToolRecap V3 matching V2 visual layout."""
@@ -282,6 +295,14 @@ class MainWindow(tk.Tk):
             persistence=self.persistence,
             settings_manager=self.settings_manager,
         )
+        self.discovery_worker = SourceDiscoveryWorker(
+            msg_queue=self.msg_queue,
+        )
+        self._active_discovery_token: int = 0
+        self._is_closed: bool = False
+        self._poll_job: Optional[str] = None
+        self._gpu_detect_job: Optional[str] = None
+        self._close_job: Optional[str] = None
 
         self.settings = self.settings_manager.load()
         self.discovered_sources: List[SourceFingerprint] = []
@@ -301,13 +322,13 @@ class MainWindow(tk.Tk):
         self._refresh_queue_table()
 
         # Background tasks
-        safe_after(self, 200, self._detect_gpu_background)
+        self._gpu_detect_job = safe_after(self, 200, self._detect_gpu_background)
 
         # Check restartable projects
         self._check_restart_projects()
 
         # Start periodic queue polling
-        safe_after(self, 100, self._poll_queue)
+        self._poll_job = safe_after(self, 100, self._poll_queue)
 
     def _build_style(self) -> None:
         style = ttk.Style(self)
@@ -485,6 +506,8 @@ class MainWindow(tk.Tk):
     # GPU and Updater Background Checks
     # -------------------------------------------------------------------------
     def _detect_gpu_background(self) -> None:
+        msg_queue = self.msg_queue
+
         def _check() -> None:
             try:
                 status = detect_gpu_encoder()
@@ -494,14 +517,35 @@ class MainWindow(tk.Tk):
                     label = "Mã hóa: CPU (libx264)"
             except Exception:
                 label = "Phần cứng: CPU"
-            safe_after(self, 0, lambda: self.gpu_status_var.set(label))
+            msg_queue.put(WorkerMessage(kind="gpu_status", data=label))
 
-        threading.Thread(target=_check, daemon=True).start()
+        threading.Thread(target=_check, daemon=True, name="GpuCheckThread").start()
+
+    def _set_discovery_busy(self, is_busy: bool, msg: str = "") -> None:
+        if is_busy:
+            self.btn_start.config(state="disabled")
+            self.btn_stop.config(state="normal")
+            self.btn_resume.config(state="disabled")
+            self.btn_render_json.config(state="disabled")
+            if msg:
+                self.status_var.set(msg)
+                self.source_var.set(msg)
+        else:
+            if not self.worker.is_running:
+                self.btn_start.config(state="normal")
+                self.btn_stop.config(state="disabled")
+                self.btn_resume.config(state="normal" if self.current_project_id else "disabled")
+                self.btn_render_json.config(state="normal")
+                self.btn_select_file.config(state="normal")
+                self.btn_select_folder.config(state="normal")
+                self.btn_clear.config(state="normal")
 
     # -------------------------------------------------------------------------
     # Source Loading (Single File -> Single Episode, Folder -> Season)
     # -------------------------------------------------------------------------
     def _choose_file(self) -> None:
+        if self.worker.is_running:
+            return
         filetypes = [
             ("Video files", "*.mp4;*.mkv;*.mov;*.avi;*.webm;*.m4v;*.ts;*.m2ts"),
             ("All files", "*.*"),
@@ -515,6 +559,8 @@ class MainWindow(tk.Tk):
             self._load_file(Path(chosen))
 
     def _choose_folder(self) -> None:
+        if self.worker.is_running:
+            return
         chosen = filedialog.askdirectory(
             parent=self,
             title="Chọn thư mục chứa video",
@@ -524,37 +570,21 @@ class MainWindow(tk.Tk):
 
     def _load_file(self, path: Path) -> None:
         p = Path(path).resolve()
-        if not p.is_file():
-            self.banner.show(f"File video không tồn tại: {p.name}", level="warning")
-            return
-        try:
-            fp = compute_file_fingerprint(p)
-            self.discovered_sources = [fp]
-            self.source_var.set(f"File: {p.name}")
-            self._refresh_queue_table()
-            self.status_var.set(f"Đã nạp file {p.name}. Nhấn 'Start Creating Recap Videos' để bắt đầu.")
-            self.banner.show(f"Đã chọn file: {p.name} (SINGLE_EPISODE)", level="info")
-        except Exception as exc:
-            self.banner.show(f"Lỗi chọn file: {exc}", level="error")
+        self._active_discovery_token = self.discovery_worker.start_discovery(p, is_folder=False)
+        self._set_discovery_busy(True, f"Đang kiểm tra file: {p.name}")
 
     def _load_folder(self, path: Path) -> None:
         p = Path(path).resolve()
-        try:
-            fps = discover_sources(p)
-            if not fps:
-                self.banner.show(f"Không tìm thấy video nào được hỗ trợ trực tiếp trong: {p.name}", level="warning")
-                return
-            self.discovered_sources = fps
-            self.source_var.set(f"Folder: {p.name} ({len(fps)} video)")
-            self._refresh_queue_table()
-            self.status_var.set(f"Đã nạp mùa phim {p.name} ({len(fps)} tập). Nhấn 'Start Creating Recap Videos' để bắt đầu.")
-            self.banner.show(f"Đã tìm thấy {len(fps)} tập phim trong {p.name}. Sẵn sàng phân tích mùa phim!", level="success")
-        except Exception as exc:
-            self.banner.show(f"Lỗi quét thư mục: {exc}", level="error")
+        self._active_discovery_token = self.discovery_worker.start_discovery(p, is_folder=True)
+        self._set_discovery_busy(True, f"Đang quét thư mục: {p.name}")
 
     def _clear_queue(self) -> None:
         if self.worker.is_running:
             return
+        if self.discovery_worker.is_running:
+            self.discovery_worker.cancel()
+        self._active_discovery_token = 0
+        self._set_discovery_busy(False)
         self.discovered_sources.clear()
         self._output_paths.clear()
         self._refresh_queue_table()
@@ -614,7 +644,7 @@ class MainWindow(tk.Tk):
     # WORKFLOW CONTROL (START / STOP / RESUME / JSON)
     # -------------------------------------------------------------------------
     def _on_start_project(self) -> None:
-        if self.worker.is_running:
+        if self.worker.is_running or self.discovery_worker.is_running:
             messagebox.showwarning("Đang thực hiện", "Một tác vụ đang chạy. Vui lòng chờ hoặc bấm Dừng.", parent=self)
             return
 
@@ -668,6 +698,12 @@ class MainWindow(tk.Tk):
         )
 
     def _on_stop_project(self) -> None:
+        if self.discovery_worker.is_running:
+            self.discovery_worker.cancel()
+            self.status_var.set("Đang dừng tác vụ chọn nguồn...")
+            self._log("Người dùng bấm Dừng chọn nguồn. Đang gửi tín hiệu hủy...")
+            return
+
         if not self.worker.is_running:
             return
 
@@ -683,7 +719,7 @@ class MainWindow(tk.Tk):
             self.worker.cancel()
 
     def _on_resume_current(self) -> None:
-        if self.worker.is_running:
+        if self.worker.is_running or self.discovery_worker.is_running:
             return
         if not self.current_project_id:
             messagebox.showinfo("Tiếp tục", "Không có dự án đang hoạt động để tiếp tục.", parent=self)
@@ -699,7 +735,7 @@ class MainWindow(tk.Tk):
         )
 
     def _on_render_existing_json(self) -> None:
-        if self.worker.is_running:
+        if self.worker.is_running or self.discovery_worker.is_running:
             messagebox.showwarning("Đang thực hiện", "Một tác vụ đang chạy. Vui lòng chờ hoặc bấm Dừng.", parent=self)
             return
 
@@ -720,12 +756,10 @@ class MainWindow(tk.Tk):
         if not self.discovered_sources:
             messagebox.showinfo(
                 "Chọn video nguồn",
-                "Vui lòng chọn tệp video hoặc thư mục chứa các video nguồn được nhắc tới trong JSON.",
+                "Vui lòng chọn tệp video hoặc thư mục chứa các video nguồn trước khi dùng tính năng dựng từ JSON.",
                 parent=self,
             )
-            self._choose_folder()
-            if not self.discovered_sources:
-                return
+            return
 
         now_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         proj_id = f"import_{now_str}"
@@ -860,14 +894,19 @@ class MainWindow(tk.Tk):
     # QUEUE POLLING & DISPATCHING (THREAD SAFE)
     # -------------------------------------------------------------------------
     def _poll_queue(self) -> None:
+        if getattr(self, "_is_closed", False):
+            return
         try:
             while True:
                 msg = self.msg_queue.get_nowait()
                 self._handle_worker_message(msg)
         except queue.Empty:
             pass
+        except Exception:
+            pass
         finally:
-            safe_after(self, 100, self._poll_queue)
+            if not getattr(self, "_is_closed", False):
+                self._poll_job = safe_after(self, 100, self._poll_queue)
 
     def _handle_worker_message(self, msg: WorkerMessage) -> None:
         kind = msg.kind
@@ -964,6 +1003,69 @@ class MainWindow(tk.Tk):
             clean_err = data.get("message", "Lỗi không xác định") if isinstance(data, dict) else str(data)
             self._log(f"LỖI: {clean_err}")
             self.banner.show(f"Lỗi: {clean_err}", level="error")
+
+        elif kind == "gpu_status":
+            self.gpu_status_var.set(str(data))
+
+        elif kind == "discovery_progress":
+            token = data.get("token") if isinstance(data, dict) else 0
+            if token != self._active_discovery_token:
+                return
+            cur = data.get("current", 0)
+            tot = data.get("total", 0)
+            if tot > 0:
+                self.status_var.set(f"Đang kiểm tra danh sách video ({cur}/{tot})...")
+
+        elif kind == "discovery_completed":
+            token = data.get("token") if isinstance(data, dict) else 0
+            if token != self._active_discovery_token:
+                return
+            self._set_discovery_busy(False)
+            fps = data.get("sources", [])
+            p_name = data.get("name", "")
+            d_kind = data.get("kind", "")
+
+            if d_kind == "file":
+                if not fps:
+                    self.banner.show(f"File video không tồn tại: {p_name}", level="warning")
+                    return
+                self.discovered_sources = fps
+                self.source_var.set(f"File: {p_name}")
+                self._refresh_queue_table()
+                self.status_var.set(f"Đã nạp file {p_name}. Nhấn 'Start Creating Recap Videos' để bắt đầu.")
+                self.banner.show(f"Đã chọn file: {p_name} (SINGLE_EPISODE)", level="info")
+            elif d_kind == "folder":
+                if not fps:
+                    self.discovered_sources.clear()
+                    self._refresh_queue_table()
+                    self.source_var.set(f"Folder: {p_name} (0 video)")
+                    self.status_var.set("Không tìm thấy video nào được hỗ trợ.")
+                    self.banner.show(f"Không tìm thấy video nào được hỗ trợ trực tiếp trong: {p_name}", level="warning")
+                    return
+                self.discovered_sources = fps
+                self.source_var.set(f"Folder: {p_name} ({len(fps)} video)")
+                self._refresh_queue_table()
+                self.status_var.set(f"Đã nạp mùa phim {p_name} ({len(fps)} tập). Nhấn 'Start Creating Recap Videos' để bắt đầu.")
+                self.banner.show(f"Đã tìm thấy {len(fps)} tập phim trong {p_name}. Sẵn sàng phân tích mùa phim!", level="success")
+
+        elif kind == "discovery_cancelled":
+            token = data.get("token") if isinstance(data, dict) else 0
+            if token != self._active_discovery_token:
+                return
+            self._set_discovery_busy(False)
+            self.status_var.set("Đã dừng tác vụ chọn nguồn.")
+            self._log("Đã dừng tác vụ chọn nguồn.")
+
+        elif kind == "discovery_failed":
+            token = data.get("token") if isinstance(data, dict) else 0
+            if token != self._active_discovery_token:
+                return
+            self._set_discovery_busy(False)
+            err = data.get("error", "Lỗi nạp nguồn") if isinstance(data, dict) else str(data)
+            self.status_var.set(f"Lỗi: {err}")
+            lvl = "warning" if "không tồn tại" in err.lower() else "error"
+            self.banner.show(f"{err}", level=lvl)
+            self._log(f"Lỗi nạp nguồn: {err}")
 
         elif kind == "finished":
             status = data.get("status") if isinstance(data, dict) else ""
@@ -1073,9 +1175,49 @@ class MainWindow(tk.Tk):
                 return
             self._log("Đang hủy tác vụ an toàn trước khi đóng ứng dụng...")
             self.worker.cancel()
-            safe_after(self, 1500, self.destroy)
+            if self.discovery_worker.is_running:
+                self.discovery_worker.cancel()
+            self._close_job = safe_after(self, 1500, self.destroy)
         else:
+            if self.discovery_worker.is_running:
+                self.discovery_worker.cancel()
             self.destroy()
+
+    def cancel_owned_after(self) -> None:
+        """Cancel pending after() callbacks owned by this window."""
+        for job_attr in ("_poll_job", "_gpu_detect_job", "_close_job"):
+            job = getattr(self, job_attr, None)
+            if job:
+                try:
+                    self.after_cancel(job)
+                except Exception:
+                    pass
+                setattr(self, job_attr, None)
+
+        if hasattr(self, "banner") and getattr(self.banner, "_auto_dismiss_job", None):
+            try:
+                self.banner.after_cancel(self.banner._auto_dismiss_job)
+            except Exception:
+                pass
+            self.banner._auto_dismiss_job = None
+
+    def destroy(self) -> None:
+        """Safe window destruction with closed guard, after cancellation, and worker stopping."""
+        if getattr(self, "_is_closed", False):
+            return
+        self._is_closed = True
+
+        self.cancel_owned_after()
+
+        if hasattr(self, "discovery_worker") and self.discovery_worker.is_running:
+            self.discovery_worker.cancel()
+        if hasattr(self, "worker") and self.worker.is_running:
+            self.worker.cancel()
+
+        try:
+            super().destroy()
+        except Exception:
+            pass
 
 
 def run_app() -> None:

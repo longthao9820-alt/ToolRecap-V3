@@ -214,6 +214,7 @@ def compute_output_fingerprint(
         "canvas_width": settings.canvas_width,
         "canvas_height": settings.canvas_height,
         "canvas_fps": settings.canvas_fps,
+        "canvas_auto": getattr(settings, "canvas_auto", True),
         "burn_subtitles": settings.burn_subtitles,
         "output_format": settings.output_format,
         "voice_id": settings.voice_id,

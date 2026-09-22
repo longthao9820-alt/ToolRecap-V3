@@ -45,7 +45,7 @@ def test_semver_single_version_source():
     cur = SemVer.parse(__version__)
     assert cur.major == 3
     assert cur.minor == 0
-    assert cur.patch == 2
+    assert cur.patch == 3
 
 
 def test_semver_comparisons():

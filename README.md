@@ -13,7 +13,7 @@ Bạn có thể mở ứng dụng bằng một trong hai cách rất đơn giả
   `ToolRecapV3.exe`
 
 - **Cách 2 (Bản nén phát hành):**
-  Mở thư mục [release](release), giải nén tệp [ToolRecapV3-v3.0.2-windows-portable.zip](release/ToolRecapV3-v3.0.2-windows-portable.zip) ra bất kỳ đâu (ví dụ Desktop), rồi nhấp đúp vào `ToolRecapV3.exe` bên trong.
+  Mở thư mục [release](release), giải nén tệp [ToolRecapV3-v3.0.3-windows-portable.zip](release/ToolRecapV3-v3.0.3-windows-portable.zip) ra bất kỳ đâu (ví dụ Desktop), rồi nhấp đúp vào `ToolRecapV3.exe` bên trong.
 
 > **Ghi chú:** Ứng dụng đã tích hợp sẵn FFmpeg, FFprobe và bộ kiểm tra hợp lệ, không cần cài đặt thêm Python hay phần mềm phụ trợ bên ngoài.
 
@@ -40,12 +40,13 @@ Trước khi bấm bắt đầu tạo recap, hãy đảm bảo hai dịch vụ s
 1. **Khởi động ứng dụng:** Nhấp đúp chuột vào `ToolRecapV3.exe`. Giao diện chính sẽ hiện lên.
 2. **Chọn video nguồn:**
    - Bấm nút **"Chọn tệp"** nếu bạn chỉ muốn tóm tắt 1 video tập phim.
-   - Bấm nút **"Chọn thư mục"** nếu bạn muốn tóm tắt nhiều tập trong cùng một thư mục. Ứng dụng sẽ tự động sắp xếp các tập theo thứ tự tự nhiên (tập 1 đến tập 10...) và chỉ lấy các tệp video trực tiếp trong thư mục đó, không quét lộn xộn các thư mục con bên trong.
+   - Bấm nút **"Chọn thư mục"** nếu bạn muốn tóm tắt nhiều tập trong cùng một thư mục. Quá trình kiểm tra và quét video được xử lý hoàn toàn dưới nền (`SourceDiscoveryWorker`), không làm treo/đơ giao diện kể cả với thư mục chứa nhiều tập phim dung lượng lớn. Giao diện hiển thị tiến trình quét và cho phép bấm "Dừng" tức thì. Ứng dụng tự động sắp xếp các tập theo thứ tự tự nhiên (tập 1 đến tập 10...) và chỉ lấy các tệp video trực tiếp trong thư mục đó, không quét lộn xộn các thư mục con bên trong.
 3. **Kiểm tra Cài đặt & Nhập Kịch bản (BẮT BUỘC):**
    - Bấm nút **"⚙ Cài đặt"** ở góc trên bên phải.
    - **Tab 1 (AI Gateway):** Kiểm tra địa chỉ `http://127.0.0.1:20128`, điền API key, cấu hình Sub model và Prime model kèm reasoning tùy chọn.
    - **Tab 2 (Kịch bản - Prompt) — BẮT BUỘC:** Nhập chỉ dẫn kịch bản bạn muốn AI tóm tắt (ví dụ: yêu cầu nội dung tập trung vào tình tiết nào, nhân vật nào, phong cách lời bình ra sao). *Lưu ý: Kịch bản là bắt buộc; các cơ chế xử lý ngoại lệ hình ảnh (visual exceptions), scanner, finalizer và bộ tự sửa lỗi (heuristic repair) của V2 đã hoàn toàn vắng mặt/bị loại bỏ. Phần mềm không tự ý chắp vá hay biên tập lại kịch bản nếu để trống.*
-   - **Tab 3 (Giọng đọc):** Chọn giọng đọc (`alloy`, ...) và ngôn ngữ (`vi`, `en-US`, ...).
+   - **Tab 3 (Giọng đọc - Toàn bộ 12 Presets V2):** Hỗ trợ đầy đủ toàn bộ 12 mẫu giọng đọc V2 thiết kế sẵn (Documentarian, Neighbor, Companion, Teacher, Anchor, Promo, Librarian, Podcaster, Luxe, Storyteller, Commentator, Explainer) cùng các giọng backend chuẩn (`alloy`, `echo`...). Ứng dụng tự động ánh xạ cấu hình chỉ dẫn `instruct` và mô tả phong cách `description` chính xác sang VoiceStudio, đồng thời từ chối triệt để các giọng Piper cũ không tương thích.
+   - **Tab 5 (Khung hình & Xuất - Khung hình tự động, Không nhập thủ công):** Khung hình video recap được tự động tính toán từ video nguồn (`calculate_auto_canvas`), chuẩn hóa tỷ lệ hiển thị DAR/SAR sang điểm ảnh vuông, xử lý xoay video 90°/270°, và luôn đảm bảo kích thước chẵn tương thích chuẩn H.264/yuv420p. Đã loại bỏ hoàn toàn các ô nhập thủ công chiều rộng và chiều cao (no manual width/height); bạn chỉ cần chỉnh tốc độ khung hình (FPS) mong muốn.
    - Bấm nút **"Lưu cài đặt"** để hoàn tất cấu hình.
 4. **Bắt đầu tạo video recap:**
    - Bấm nút **"BẮT ĐẦU"**.
@@ -58,7 +59,7 @@ Trước khi bấm bắt đầu tạo recap, hãy đảm bảo hai dịch vụ s
 
 ## 4. Truyền phát video theo luồng (Streaming), Kiến trúc Hai Giai đoạn & Giới hạn thực tế từ nhà cung cấp
 
-- **Không giới hạn cứng ở ứng dụng (No App Cap):** Khác với phiên bản cũ áp đặt giới hạn 500 MB cho mỗi tệp, ToolRecap V3.0.2 đã loại bỏ giới hạn cứng này (`DEFAULT_MAX_FILE_SIZE_BYTES = None`) và chuyển sang cơ chế truyền phát theo luồng (`StreamingChatPayload`) mã hóa base64 trực tiếp khi gửi request. Kiểm thử thực tế với tệp mẫu 550 MB chứng minh mức sử dụng bộ nhớ đỉnh (peak memory) chỉ khoảng ~0.30 MB.
+- **Không giới hạn cứng ở ứng dụng (No App Cap):** Khác với phiên bản cũ áp đặt giới hạn 500 MB cho mỗi tệp, ToolRecap V3.0.3 đã loại bỏ giới hạn cứng này (`DEFAULT_MAX_FILE_SIZE_BYTES = None`) và chuyển sang cơ chế truyền phát theo luồng (`StreamingChatPayload`) mã hóa base64 trực tiếp khi gửi request. Kiểm thử thực tế với tệp mẫu 550 MB chứng minh mức sử dụng bộ nhớ đỉnh (peak memory) chỉ khoảng ~0.30 MB.
 - **Kiến trúc Hai Giai đoạn (Two-Stage Sub/Prime Architecture):**
   - Giai đoạn 1 (Sub): Truyền phát toàn bộ video nguồn tới Sub model để phân tích hình ảnh và thời gian dạng free-text. Kết quả được lưu lập tức vào `sub_analysis/<mã_dự_án>.txt` làm checkpoint an toàn.
   - Giai đoạn 2 (Prime): Gửi văn bản phân tích từ Sub cùng prompt của người dùng, metadata kỹ thuật (tên file, độ dài ms) và technical schema tới Prime model để tạo Final JSON chuẩn xác, lưu tại `final/<mã_dự_án>.json`.

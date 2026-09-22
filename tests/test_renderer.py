@@ -442,6 +442,7 @@ def test_burn_subtitles_mode(tmp_path: Path, synthetic_sources):
         canvas_fps=25.0,
         use_gpu=False,
         burn_subtitles=True,
+        canvas_auto=False,
     )
 
     output_def = {
@@ -833,3 +834,152 @@ def test_boundary_no_repeat_source_hashing(tmp_path: Path, synthetic_sources, mo
 
     # In render_output, compute_file_sha256 should NOT be called at all
     assert hash_call_count == 0
+
+
+# ==============================================================================
+# Focused Tests: Auto Canvas 640x480 Multi-Source and Anamorphic DAR Aspect Fit
+# ==============================================================================
+
+
+def test_multisource_first_clip_640x480_outputdims_not_1080p(tmp_path: Path, synthetic_sources):
+    """Verify multi-source render with first clip 640x480 uses 640x480 canvas, not 1080p fallback."""
+    out_dir = tmp_path / "out_640x480"
+    out_dir.mkdir()
+
+    # First clip is 640x480 (no audio)
+    # Second clip is 1280x720 (has audio)
+    # Third clip is 800x600 (has audio)
+    output_def = {
+        "title": "FirstClip640x480_Recap",
+        "segments": [
+            {
+                "segment_id": "seg_01",
+                "source_file": "clip_480p_noaudio.mp4",
+                "start_ms": 0,
+                "end_ms": 1000,
+                "type": "original_dialogue",
+                "narration": "",
+                "source_audio": False,
+            },
+            {
+                "segment_id": "seg_02",
+                "source_file": "clip_720p_24fps.mp4",
+                "start_ms": 500,
+                "end_ms": 1500,
+                "type": "original_dialogue",
+                "narration": "",
+                "source_audio": True,
+            },
+            {
+                "segment_id": "seg_03",
+                "source_file": "clip_600p_30fps.mp4",
+                "start_ms": 500,
+                "end_ms": 1500,
+                "type": "original_dialogue",
+                "narration": "",
+                "source_audio": True,
+            },
+        ],
+    }
+
+    # AppSettings with default canvas_auto=True (fallback is 1920x1080)
+    settings = AppSettings(
+        use_gpu=False,
+        canvas_width=1920,
+        canvas_height=1080,
+        canvas_auto=True,
+    )
+
+    res = render_output(
+        output_def=output_def,
+        source_paths=synthetic_sources,
+        output_dir=out_dir,
+        settings=settings,
+    )
+
+    # Invariant: Output dimensions MUST match first clip (640x480), NOT 1080p fallback
+    assert res.width == 640, f"Expected width 640, got {res.width}"
+    assert res.height == 480, f"Expected height 480, got {res.height}"
+    assert (res.width, res.height) != (1920, 1080)
+
+    # Validate output media probe
+    probe = probe_media(res.output_path)
+    assert probe.has_video is True
+    assert probe.has_audio is True
+    assert probe.width == 640
+    assert probe.height == 480
+    assert probe.duration == pytest.approx(3.0, abs=0.2)
+    assert probe.audio_streams[0].sample_rate == 48000
+    assert probe.audio_streams[0].channels == 2
+
+
+def test_renderer_aspectfit_respects_anamorphic_display_ratio(tmp_path: Path):
+    """Verify aspectfit respects anamorphic DISPLAY aspect ratio (ih*dar), not coded ratio."""
+    src_dir = tmp_path / "ana_sources"
+    src_dir.mkdir()
+    out_dir = tmp_path / "ana_output"
+    out_dir.mkdir()
+
+    # Create synthetic anamorphic source: 720x480 with SAR 32:27 -> DAR 16:9, with audio
+    ana_src = src_dir / "anamorphic_16_9.mp4"
+    subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", "testsrc=size=720x480:rate=25:duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=1000:duration=1",
+            "-vf", "setsar=32/27",
+            "-c:v", "libx264", "-preset", "ultrafast",
+            "-c:a", "aac", "-ar", "48000", "-ac", "2",
+            str(ana_src),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    # 1. Test auto canvas on anamorphic source:
+    # 720x480 with DAR 16:9 has display width 480 * (16/9) = 853.33 -> 854x480 (even)
+    ana_probe = probe_media(ana_src)
+    from toolrecap_v3.media import calculate_auto_canvas
+    auto_w, auto_h = calculate_auto_canvas(ana_probe)
+    assert (auto_w, auto_h) == (854, 480)
+
+    # 2. Render anamorphic source into 1280x720 canvas (16:9):
+    # With ih*dar square-pixel normalization, 16:9 display content fills 1280x720 without horizontal squish
+    output_def = {
+        "title": "Anamorphic_AspectFit",
+        "segments": [
+            {
+                "segment_id": "s1",
+                "source_file": "anamorphic_16_9.mp4",
+                "start_ms": 0,
+                "end_ms": 1000,
+                "type": "original_dialogue",
+                "narration": "",
+                "source_audio": True,
+            }
+        ],
+    }
+
+    settings = AppSettings(
+        canvas_width=1280,
+        canvas_height=720,
+        canvas_auto=False,
+        use_gpu=False,
+    )
+
+    res = render_output(
+        output_def=output_def,
+        source_paths={"anamorphic_16_9.mp4": ana_src},
+        output_dir=out_dir,
+        settings=settings,
+    )
+
+    assert res.output_path.is_file()
+    probe = probe_media(res.output_path)
+    assert probe.width == 1280
+    assert probe.height == 720
+    assert probe.aspect_ratio == "16:9"
+    # Output must have square pixels (SAR 1:1)
+    if probe.video_streams:
+        assert probe.video_streams[0].sar in ("1:1", "1/1", "")
+

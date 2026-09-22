@@ -7,7 +7,7 @@ import os
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from toolrecap_v3.cancellation import CancellationToken
 from toolrecap_v3.errors import (
@@ -90,7 +90,9 @@ def natural_sort_key(s: str) -> Tuple[List[Tuple[int, int | str]], str]:
 
 
 def compute_file_fingerprint(
-    file_path: Path, cancellation_token: Optional[CancellationToken] = None
+    file_path: Path,
+    cancellation_token: Optional[CancellationToken] = None,
+    compute_hash: bool = True,
 ) -> SourceFingerprint:
     """Compute sha256, size, and mtime for a file without modifying its bytes."""
     if cancellation_token:
@@ -100,6 +102,16 @@ def compute_file_fingerprint(
     stat_result = path_obj.stat()
     size_bytes = stat_result.st_size
     mtime_ns = stat_result.st_mtime_ns
+
+    if not compute_hash:
+        return SourceFingerprint(
+            basename=path_obj.name,
+            path=str(path_obj),
+            size_bytes=size_bytes,
+            mtime_ns=mtime_ns,
+            sha256="",
+            extension=path_obj.suffix.lower(),
+        )
 
     hasher = hashlib.sha256()
     # Read-only binary mode to strictly preserve source bytes
@@ -133,6 +145,7 @@ def discover_sources(
     directory: str | Path,
     cancellation_token: Optional[CancellationToken] = None,
     compute_hash: bool = True,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> List[SourceFingerprint]:
     """Discover source video files non-recursively with natural sorting and collision detection.
     
@@ -193,11 +206,12 @@ def discover_sources(
 
     # Compute fingerprints
     fingerprints: List[SourceFingerprint] = []
-    for p in matching_files:
+    total_matching = len(matching_files)
+    for idx, p in enumerate(matching_files, start=1):
         if cancellation_token:
             cancellation_token.check_cancelled()
         if compute_hash:
-            fp = compute_file_fingerprint(p, cancellation_token)
+            fp = compute_file_fingerprint(p, cancellation_token, compute_hash=True)
         else:
             stat_res = p.stat()
             fp = SourceFingerprint(
@@ -209,6 +223,8 @@ def discover_sources(
                 extension=p.suffix.lower(),
             )
         fingerprints.append(fp)
+        if progress_callback:
+            progress_callback(idx, total_matching)
 
     return fingerprints
 

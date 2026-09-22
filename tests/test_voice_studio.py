@@ -201,3 +201,94 @@ def test_cancellation():
     adapter = VoiceStudioAdapter(mode="local")
     with pytest.raises(CancelledError):
         adapter.synthesize("Test input", cancellation_token=token)
+
+
+def test_actual_v2_preset_payload_all_12_and_piper_reject():
+    """Verify all 12 V2 presets produce exact archetype instruct payloads and reject Piper."""
+    import json
+    from toolrecap_v3.voice_studio import V2_VOICE_PRESETS
+
+    # Exact archetype instructions from V2 catalog (C:/Users/Long/Desktop/ToolRecap_V2/toolrecap_v2/voice/catalog.py)
+    # and omnivoice_adapter.py (OFFICIAL_VOICE_INSTRUCTS)
+    v2_catalog_exact_instructs = {
+        "voicestudio.en.neighbor": "female, young adult, moderate pitch, american accent",
+        "voicestudio.en.companion": "female, middle-aged, moderate pitch, canadian accent",
+        "voicestudio.en.teacher": "female, middle-aged, moderate pitch, american accent",
+        "voicestudio.en.anchor": "male, middle-aged, moderate pitch, american accent",
+        "voicestudio.en.documentarian": "male, middle-aged, low pitch, american accent",
+        "voicestudio.en.promo": "male, middle-aged, low pitch",
+        "voicestudio.en.librarian": "female, middle-aged, low pitch, british accent",
+        "voicestudio.en.podcaster": "female, young adult, high pitch, australian accent",
+        "voicestudio.en.luxe": "female, middle-aged, moderate pitch, british accent",
+        "voicestudio.en.storyteller": "male, elderly, low pitch, british accent",
+        "voicestudio.en.commentator": "male, middle-aged, high pitch, british accent",
+        "voicestudio.en.explainer": "male, young adult, moderate pitch, british accent",
+    }
+
+    assert len(v2_catalog_exact_instructs) == 12
+    assert set(v2_catalog_exact_instructs.keys()) == set(V2_VOICE_PRESETS.keys())
+
+    valid_wav = make_dummy_wav(duration_s=1.0)
+    captured_payloads = []
+
+    def mock_speech_handler(request: httpx.Request) -> httpx.Response:
+        if "/health" in str(request.url):
+            return httpx.Response(200, json={"status": "ok"})
+        if "/speech" in str(request.url):
+            payload = json.loads(request.read())
+            captured_payloads.append(payload)
+            return httpx.Response(200, content=valid_wav)
+        return httpx.Response(404)
+
+    client = httpx.Client(transport=httpx.MockTransport(mock_speech_handler))
+    adapter = VoiceStudioAdapter(mode="local", client=client)
+
+    # 1. Test all 12 presets: verify exact payload, voice="default", and style doesn't overwrite instruct
+    for voice_id, expected_instruct in v2_catalog_exact_instructs.items():
+        captured_payloads.clear()
+
+        # Invariant: V2 preset instruct must match V2 catalog exactly
+        preset_info = V2_VOICE_PRESETS[voice_id]
+        assert preset_info["instruct"] == expected_instruct
+
+        # Synthesize with explicit style to verify style does NOT overwrite archetype instruct
+        result_wav = adapter.synthesize(
+            "Test narration text",
+            voice=voice_id,
+            style="film_recap",
+        )
+        assert result_wav == valid_wav
+        assert len(captured_payloads) == 1
+        payload = captured_payloads[0]
+
+        assert payload["voice"] == "default", f"Preset {voice_id} must map voice to 'default'"
+        assert payload["model"] == "omnivoice"
+        assert payload["instruct"] == expected_instruct, (
+            f"Preset {voice_id} instruct mismatch. Expected '{expected_instruct}', got '{payload['instruct']}'"
+        )
+        # Style is placed into description; archetype instruct must NOT be overwritten by style
+        assert payload["description"] == "film_recap"
+        assert payload["instruct"] != "film_recap"
+
+    # 2. Test without explicit style: description defaults to preset's description
+    for voice_id, expected_instruct in v2_catalog_exact_instructs.items():
+        captured_payloads.clear()
+        adapter.synthesize("Another text", voice=voice_id)
+        assert len(captured_payloads) == 1
+        payload = captured_payloads[0]
+        assert payload["voice"] == "default"
+        assert payload["instruct"] == expected_instruct
+        assert payload["description"] == V2_VOICE_PRESETS[voice_id]["description"]
+
+    # 3. Piper rejection: all Piper voices must raise VoiceStudioUnavailableError
+    piper_voices = [
+        "piper.en_US-lessac-medium",
+        "piper.en_US-ryan-medium",
+        "piper.en_GB-alba-medium",
+        "piper.en_GB-alan-medium",
+        "piper.other_unknown_voice",
+    ]
+    for piper_id in piper_voices:
+        with pytest.raises(VoiceStudioUnavailableError, match="unavailable in VoiceStudio or V2 presets"):
+            adapter.synthesize("Piper attempt", voice=piper_id)
+
