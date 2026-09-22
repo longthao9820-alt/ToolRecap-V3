@@ -416,3 +416,43 @@ def test_settings_dialog_v2_visual_sidebar_layout(tmp_path: Path):
         app.destroy()
 
 
+def test_settings_dialog_dual_model_and_reasoning_save_and_callbacks(tmp_path: Path):
+    """Verify SettingsDialog edits, saves, and invokes callbacks with dual Sub/Prime models and reasoning."""
+    persistence = ProjectPersistence(storage_root=tmp_path)
+    app = MainWindow(persistence=persistence)
+    try:
+        app.update_idletasks()
+        mock_saved_cb = MagicMock()
+        dialog = SettingsDialog(app, persistence=persistence, on_saved=mock_saved_cb)
+        dialog.update_idletasks()
+
+        # Update dual model and reasoning fields
+        dialog.var_gw_sub_model.set("ag/custom-sub-v1")
+        dialog.var_gw_sub_reasoning.set("high")
+        dialog.var_gw_prime_model.set("ag/custom-prime-v1")
+        dialog.var_gw_prime_reasoning.set("low")
+
+        dialog._on_save()
+
+        # Invariant: on_saved callback received updated AppSettings
+        mock_saved_cb.assert_called_once()
+        saved_settings = mock_saved_cb.call_args[0][0]
+        assert isinstance(saved_settings, AppSettings)
+        assert saved_settings.gateway_sub_model == "ag/custom-sub-v1"
+        assert saved_settings.gateway_sub_reasoning == "high"
+        assert saved_settings.gateway_prime_model == "ag/custom-prime-v1"
+        assert saved_settings.gateway_prime_reasoning == "low"
+
+        # Invariant: settings persisted to disk
+        mgr = SettingsManager(persistence=persistence)
+        loaded = mgr.load()
+        assert loaded.gateway_sub_model == "ag/custom-sub-v1"
+        assert loaded.gateway_sub_reasoning == "high"
+        assert loaded.gateway_prime_model == "ag/custom-prime-v1"
+        assert loaded.gateway_prime_reasoning == "low"
+
+        dialog.destroy()
+    finally:
+        app.destroy()
+
+

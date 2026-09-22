@@ -68,6 +68,7 @@ class StreamingChatPayload:
         source_metadata: Optional[List[Dict[str, Any]]] = None,
         cancellation_token: Optional[CancellationToken] = None,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
+        reasoning_effort: Optional[str] = None,
     ) -> None:
         if chunk_size <= 0 or chunk_size % 3 != 0:
             raise ValueError(f"chunk_size must be positive and divisible by 3, got {chunk_size}")
@@ -79,6 +80,7 @@ class StreamingChatPayload:
         self.source_metadata = source_metadata
         self.cancellation_token = cancellation_token
         self.chunk_size = chunk_size
+        self.reasoning_effort = reasoning_effort.strip().lower() if reasoning_effort and reasoning_effort.strip() else None
 
         # Normalize sources to (Path, mime_type, file_size)
         self.sources: List[Tuple[Path, str, int]] = []
@@ -94,7 +96,10 @@ class StreamingChatPayload:
                 self.sources.append((p, m, sz))
 
         # Static JSON head
-        prefix_json = json.dumps({"model": self.model, "stream": self.stream}, ensure_ascii=False)
+        payload_data: Dict[str, Any] = {"model": self.model, "stream": self.stream}
+        if self.reasoning_effort:
+            payload_data["reasoning_effort"] = self.reasoning_effort
+        prefix_json = json.dumps(payload_data, ensure_ascii=False)
         self._head_bytes = (prefix_json[:-1] + ', "messages": [{"role": "user", "content": [').encode("utf-8")
         self._prompt_bytes = json.dumps({"type": "text", "text": self.prompt}, ensure_ascii=False).encode("utf-8")
 
@@ -218,8 +223,8 @@ def extract_json_from_text(text: str) -> Any:
 class GatewayResult:
     """Container for sanitized Gateway output."""
     raw_response: str
-    parsed_json: Union[Dict[str, Any], List[Any]]
-    model: str
+    parsed_json: Optional[Union[Dict[str, Any], List[Any]]] = None
+    model: str = ""
     usage: Optional[Dict[str, Any]] = None
 
 
@@ -267,7 +272,9 @@ class GatewayClient:
         """Validate that the target model advertises 'videoInput' capability.
         
         Calls GET /v1/models and inspects capabilities.
-        Raises ModelCapabilityError if capability is missing or false.
+        Invariants:
+        - Combo aliases and models with omitted capabilities are not false rejected.
+        - Models explicitly setting videoInput=False are rejected.
         """
         if cancellation_token:
             cancellation_token.check_cancelled()
@@ -292,12 +299,19 @@ class GatewayClient:
 
             for m in models_list:
                 if isinstance(m, dict) and m.get("id") == model:
-                    capabilities = m.get("capabilities", {})
-                    if capabilities.get("videoInput") is True:
+                    if m.get("owned_by") == "combo":
                         return True
-                    raise ModelCapabilityError(
-                        f"Model '{model}' does not advertise 'videoInput' capability."
-                    )
+                    capabilities = m.get("capabilities")
+                    if capabilities is None or not isinstance(capabilities, dict):
+                        return True
+                    if capabilities.get("videoInput") is False:
+                        raise ModelCapabilityError(
+                            f"Model '{model}' does not advertise 'videoInput' capability."
+                        )
+                    return True
+
+            if model in ("sub", "prime"):
+                return True
 
             raise ModelCapabilityError(f"Model '{model}' not found in advertised Gateway models.")
         except (ModelCapabilityError, GatewayResponseError):
@@ -305,6 +319,54 @@ class GatewayClient:
         except Exception as e:
             clean_err = self._sanitize(str(e))
             raise GatewayError(f"Error checking model video capability: {clean_err}") from e
+        finally:
+            if owned:
+                client.close()
+
+    def validate_model_prime_capability(
+        self,
+        model: str,
+        cancellation_token: Optional[CancellationToken] = None,
+        client: Optional[httpx.Client] = None,
+    ) -> bool:
+        """Validate that the target model is available for Prime text chat synthesis.
+        
+        Calls GET /v1/models and verifies model presence.
+        """
+        if cancellation_token:
+            cancellation_token.check_cancelled()
+
+        if model in ("sub", "prime"):
+            return True
+
+        url = f"{self.base_url}/v1/models"
+        owned = False
+        if client is None:
+            if self._external_client is not None:
+                client = self._external_client
+            else:
+                client = httpx.Client(timeout=min(10.0, self.timeout))
+                owned = True
+
+        try:
+            resp = client.get(url, headers=self._headers(), timeout=min(10.0, self.timeout))
+            if resp.status_code != 200:
+                raise GatewayResponseError(
+                    self._sanitize(f"Failed to query models from {url}: HTTP {resp.status_code}")
+                )
+            data = resp.json()
+            models_list = data.get("data", []) if isinstance(data, dict) else []
+
+            for m in models_list:
+                if isinstance(m, dict) and m.get("id") == model:
+                    return True
+
+            raise ModelCapabilityError(f"Model '{model}' not found in advertised Gateway models.")
+        except (ModelCapabilityError, GatewayResponseError):
+            raise
+        except Exception as e:
+            clean_err = self._sanitize(str(e))
+            raise GatewayError(f"Error checking prime model capability: {clean_err}") from e
         finally:
             if owned:
                 client.close()
@@ -374,12 +436,14 @@ class GatewayClient:
         self,
         sources: Sequence[Union[Path, str]],
         prompt: str,
-        model: str = "ag/gemini-3.8-flash",
+        model: str = "sub",
         technical_schema: Optional[Union[Dict[str, Any], str]] = None,
         source_metadata: Optional[List[Dict[str, Any]]] = None,
         stream: bool = True,
         validate_capability: bool = True,
         cancellation_token: Optional[CancellationToken] = None,
+        reasoning_effort: Optional[str] = None,
+        expect_json: bool = True,
     ) -> GatewayResult:
         """Submit all ordered sources and prompt in ONE chat request.
         
@@ -425,6 +489,7 @@ class GatewayClient:
                 technical_schema=technical_schema,
                 source_metadata=source_metadata,
                 cancellation_token=cancellation_token,
+                reasoning_effort=reasoning_effort,
             )
 
             url = f"{self.base_url}/v1/chat/completions"
@@ -450,7 +515,13 @@ class GatewayClient:
 
                     # Step 5: Sanitize response and parse JSON (no repair)
                     sanitized_response = self._sanitize(raw_text)
-                    parsed = extract_json_from_text(sanitized_response)
+                    if expect_json:
+                        parsed = extract_json_from_text(sanitized_response)
+                    else:
+                        try:
+                            parsed = extract_json_from_text(sanitized_response)
+                        except Exception:
+                            parsed = None
 
                     return GatewayResult(
                         raw_response=sanitized_response,
@@ -468,8 +539,125 @@ class GatewayClient:
                     if not getattr(e, "raw_response", None):
                         e.raw_response = sanitized_response
                     raise
-                except GatewayResponseError as e:
+                except GatewayResponseError:
                     # If non-transient status code, fail immediately
+                    raise
+                except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPStatusError) as e:
+                    last_exception = e
+                    clean_err = self._sanitize(str(e))
+                    if attempt < self.max_retries:
+                        sleep_time = self.backoff_factor * (2 ** attempt)
+                        if cancellation_token:
+                            end_time = time.monotonic() + sleep_time
+                            while time.monotonic() < end_time:
+                                cancellation_token.check_cancelled()
+                                time.sleep(0.05)
+                        else:
+                            time.sleep(sleep_time)
+                        continue
+                    else:
+                        raise GatewayError(
+                            f"Gateway request failed after {self.max_retries + 1} attempts: {clean_err}"
+                        ) from e
+                except Exception as e:
+                    clean_err = self._sanitize(str(e))
+                    raise GatewayError(f"Unexpected Gateway error: {clean_err}") from e
+
+            if last_exception:
+                raise GatewayError(f"Gateway request failed: {self._sanitize(str(last_exception))}")
+            raise GatewayError("Gateway request failed: retries exhausted.")
+        finally:
+            if owned_client:
+                client.close()
+
+    def submit_text_chat(
+        self,
+        prompt: str,
+        model: str = "prime",
+        system_prompt: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
+        stream: bool = True,
+        expect_json: bool = True,
+        cancellation_token: Optional[CancellationToken] = None,
+    ) -> GatewayResult:
+        """Submit text-only chat request (Prime stage / synthesis).
+        
+        Invariants:
+        - Text only, no videoInput required.
+        - Configured API route (/v1/chat/completions) only.
+        - Optional reasoning_effort supported.
+        - Cancel-aware streaming networking with transient retries.
+        - Returns raw sanitized response and parsed JSON without repair.
+        """
+        if not prompt or not prompt.strip():
+            raise ValueError("Prompt cannot be empty.")
+
+        if cancellation_token:
+            cancellation_token.check_cancelled()
+
+        owned_client = False
+        if self._external_client is not None:
+            client = self._external_client
+        else:
+            client = httpx.Client(timeout=self.timeout)
+            owned_client = True
+
+        try:
+            messages: List[Dict[str, Any]] = []
+            if system_prompt and system_prompt.strip():
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
+
+            payload_dict: Dict[str, Any] = {
+                "model": model,
+                "messages": messages,
+                "stream": stream,
+            }
+            if reasoning_effort and reasoning_effort.strip():
+                payload_dict["reasoning_effort"] = reasoning_effort.strip().lower()
+
+            url = f"{self.base_url}/v1/chat/completions"
+            headers = self._headers()
+
+            last_exception: Optional[Exception] = None
+
+            for attempt in range(self.max_retries + 1):
+                if cancellation_token:
+                    cancellation_token.check_cancelled()
+
+                try:
+                    if stream:
+                        raw_text, usage = self._execute_streaming_request(
+                            client, url, payload_dict, headers, cancellation_token
+                        )
+                    else:
+                        raw_text, usage = self._execute_sync_request(
+                            client, url, payload_dict, headers, cancellation_token
+                        )
+
+                    sanitized_response = self._sanitize(raw_text)
+                    if expect_json:
+                        parsed = extract_json_from_text(sanitized_response)
+                    else:
+                        try:
+                            parsed = extract_json_from_text(sanitized_response)
+                        except Exception:
+                            parsed = None
+
+                    return GatewayResult(
+                        raw_response=sanitized_response,
+                        parsed_json=parsed,
+                        model=model,
+                        usage=usage,
+                    )
+
+                except CancelledError:
+                    raise
+                except InvalidGatewayResponseError as e:
+                    if not getattr(e, "raw_response", None):
+                        e.raw_response = sanitized_response
+                    raise
+                except GatewayResponseError:
                     raise
                 except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPStatusError) as e:
                     last_exception = e

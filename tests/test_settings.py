@@ -46,9 +46,13 @@ def test_settings_defaults():
     assert s.voice_local_url == "http://127.0.0.1:3900"
     assert s.voice_remote_url == ""
 
-    # Gateway
+    # Gateway (Dual Sub/Prime defaults)
     assert s.gateway_endpoint == "http://127.0.0.1:20128"
-    assert s.gateway_model == "ag/gemini-3.8-flash"
+    assert s.gateway_sub_model == "sub"
+    assert s.gateway_sub_reasoning == ""
+    assert s.gateway_prime_model == "prime"
+    assert s.gateway_prime_reasoning == ""
+    assert s.gateway_model == "sub"
 
     # Notifications defaults ON
     assert s.notify_complete is True
@@ -76,6 +80,10 @@ def test_settings_persistence_roundtrip(tmp_path: Path):
         auto_duck=True,
         voice_style="cinematic",
         voice_id="echo",
+        gateway_sub_model="custom-sub-model",
+        gateway_sub_reasoning="high",
+        gateway_prime_model="custom-prime-model",
+        gateway_prime_reasoning="low",
     )
     mgr.save(custom_s)
 
@@ -87,3 +95,7 @@ def test_settings_persistence_roundtrip(tmp_path: Path):
     assert loaded_s.voice_style == "cinematic"
     assert loaded_s.voice_id == "echo"
     assert loaded_s.target_loudness_lufs == -14.0  # preserved default
+    assert loaded_s.gateway_sub_model == "custom-sub-model"
+    assert loaded_s.gateway_sub_reasoning == "high"
+    assert loaded_s.gateway_prime_model == "custom-prime-model"
+    assert loaded_s.gateway_prime_reasoning == "low"

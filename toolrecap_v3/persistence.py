@@ -91,12 +91,14 @@ class ProjectPersistence:
         self.checkpoints_dir = self.root / "checkpoints"
         self.settings_dir = self.root / "settings"
         self.raw_dir = self.root / "raw"
+        self.sub_dir = self.root / "sub_analysis"
         self.final_dir = self.root / "final"
 
         self.projects_dir.mkdir(parents=True, exist_ok=True)
         self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
         self.settings_dir.mkdir(parents=True, exist_ok=True)
         self.raw_dir.mkdir(parents=True, exist_ok=True)
+        self.sub_dir.mkdir(parents=True, exist_ok=True)
         self.final_dir.mkdir(parents=True, exist_ok=True)
 
     def _project_path(self, project_id: str) -> Path:
@@ -106,6 +108,10 @@ class ProjectPersistence:
     def _raw_path(self, project_id: str) -> Path:
         validate_windows_name(project_id, "project_id")
         return self.raw_dir / f"{project_id}.txt"
+
+    def _sub_path(self, project_id: str) -> Path:
+        validate_windows_name(project_id, "project_id")
+        return self.sub_dir / f"{project_id}.txt"
 
     def _final_path(self, project_id: str) -> Path:
         validate_windows_name(project_id, "project_id")
@@ -195,6 +201,43 @@ class ProjectPersistence:
     def has_raw_response(self, project_id: str) -> bool:
         """Check if raw response exists on disk."""
         return self._raw_path(project_id).exists()
+
+    def save_sub_analysis(self, project_id: str, sub_analysis: str) -> Path:
+        """Save raw Sub video analysis text atomically in LOCALAPPDATA."""
+        validate_windows_name(project_id, "project_id")
+        check_for_secrets({"sub_analysis": sub_analysis})
+        target = self._sub_path(project_id)
+        tmp_path = target.parent / f"{target.name}.tmp.{uuid.uuid4().hex}"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(sub_analysis)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, target)
+            return target
+        except Exception as e:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+            if isinstance(e, SecretExposureError):
+                raise
+            raise PersistenceError(f"Failed to atomically write Sub analysis to {target}: {e}") from e
+
+    def load_sub_analysis(self, project_id: str) -> str:
+        """Load raw Sub video analysis from LOCALAPPDATA."""
+        target = self._sub_path(project_id)
+        if not target.exists():
+            raise PersistenceError(f"Sub analysis file does not exist: {target}")
+        try:
+            return target.read_text(encoding="utf-8")
+        except Exception as e:
+            raise PersistenceError(f"Failed to read Sub analysis from {target}: {e}") from e
+
+    def has_sub_analysis(self, project_id: str) -> bool:
+        """Check if Sub analysis exists on disk."""
+        return self._sub_path(project_id).exists()
 
     def save_final_json(self, project_id: str, final_json: Dict[str, Any]) -> Path:
         """Save final validated project JSON atomically in LOCALAPPDATA."""

@@ -335,6 +335,10 @@ class WorkflowWorker:
             elif status == ProjectStatus.CANCELLED.value:
                 self._put_message("log", "Trạng thái dự án: Đã dừng.")
 
+        def on_sub_analysis(sub_text: str) -> None:
+            self._put_message("sub_analysis", sub_text)
+            self._put_message("log", "Phân tích Sub video hoàn tất, đã lưu checkpoint nội dung.")
+
         def on_raw_response(raw: str) -> None:
             self._put_message("raw_response", raw)
 
@@ -364,6 +368,7 @@ class WorkflowWorker:
 
         return WorkflowCallbacks(
             on_status_change=on_status_change,
+            on_sub_analysis=on_sub_analysis,
             on_raw_response=on_raw_response,
             on_final_json=on_final_json,
             on_output_started=on_output_started,

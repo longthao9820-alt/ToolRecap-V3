@@ -100,6 +100,7 @@ class WorkflowCallbacks:
     """Optional callbacks for tracking workflow progress."""
 
     on_status_change: Optional[Callable[[str], None]] = None
+    on_sub_analysis: Optional[Callable[[str], None]] = None
     on_raw_response: Optional[Callable[[str], None]] = None
     on_final_json: Optional[Callable[[Dict[str, Any]], None]] = None
     on_output_started: Optional[Callable[[str], None]] = None
@@ -382,6 +383,7 @@ class ProjectWorkflow:
                 "created_at": now_iso,
                 "updated_at": now_iso,
             },
+            "sub_analysis": None,
             "raw_response": None,
             "final_json": None,
             "outputs": {},
@@ -466,6 +468,7 @@ class ProjectWorkflow:
                 "updated_at": now_iso,
                 "analyzed_at": now_iso,
             },
+            "sub_analysis": None,
             "raw_response": None,
             "final_json": final_json,
             "outputs": {},
@@ -574,34 +577,113 @@ class ProjectWorkflow:
                 state["final_json"] = final_json
 
             if final_json is None:
-                # ONE project ONE Gateway submission
+                # Stage 1: Sub model (whole original videos -> text analysis)
                 if cancellation_token:
                     cancellation_token.check_cancelled()
 
-                now_iso = datetime.now(timezone.utc).isoformat()
-                state["status"] = ProjectStatus.ANALYZING.value
-                state["timestamps"]["analyzing_started_at"] = now_iso
-                state["timestamps"]["updated_at"] = now_iso
-                self.persistence.save_project(state)
-                if callbacks and callbacks.on_status_change:
-                    callbacks.on_status_change(ProjectStatus.ANALYZING.value)
+                sub_analysis = state.get("sub_analysis")
+                if not sub_analysis and self.persistence.has_sub_analysis(project_id):
+                    sub_analysis = self.persistence.load_sub_analysis(project_id)
+                    state["sub_analysis"] = sub_analysis
 
-                # Build naturally ordered sources list
                 ordered_sources = [
                     Path(fp["path"]).resolve()
                     for fp in sorted(state["source_fingerprints"].values(), key=lambda x: natural_sort_key(x["basename"]))
                 ]
+                source_meta = [
+                    {
+                        "source_file": s["source_file"],
+                        "duration_ms": s.get("duration_ms"),
+                    }
+                    for s in state.get("sources", [])
+                ]
+                if not source_meta:
+                    source_meta = [{"source_file": p.name} for p in ordered_sources]
+
+                if not sub_analysis:
+                    now_iso = datetime.now(timezone.utc).isoformat()
+                    state["status"] = ProjectStatus.ANALYZING.value
+                    state["timestamps"]["analyzing_started_at"] = now_iso
+                    state["timestamps"]["updated_at"] = now_iso
+                    self.persistence.save_project(state)
+                    if callbacks and callbacks.on_status_change:
+                        callbacks.on_status_change(ProjectStatus.ANALYZING.value)
+
+                    try:
+                        sub_result = self.gateway_client.submit_chat_analysis(
+                            sources=ordered_sources,
+                            prompt=state["prompt"],
+                            model=cfg.gateway_sub_model,
+                            source_metadata=source_meta,
+                            reasoning_effort=cfg.gateway_sub_reasoning or None,
+                            expect_json=False,
+                            cancellation_token=cancellation_token,
+                        )
+                        sub_analysis = sub_result.raw_response
+                    except CancelledError:
+                        raise
+                    except InvalidGatewayResponseError as e:
+                        raw_sub = getattr(e, "raw_response", None)
+                        if raw_sub:
+                            self.persistence.save_raw_response(project_id, raw_sub)
+                            state["raw_response"] = raw_sub
+                        state["status"] = ProjectStatus.FAILED.value
+                        state["error"] = str(e)
+                        state["timestamps"]["failed_at"] = datetime.now(timezone.utc).isoformat()
+                        self.persistence.save_project(state)
+                        if callbacks and callbacks.on_error:
+                            callbacks.on_error(e, raw_sub)
+                        raise
+                    except Exception as e:
+                        state["status"] = ProjectStatus.FAILED.value
+                        state["error"] = str(e)
+                        state["timestamps"]["failed_at"] = datetime.now(timezone.utc).isoformat()
+                        self.persistence.save_project(state)
+                        if callbacks and callbacks.on_error:
+                            callbacks.on_error(e, None)
+                        raise
+
+                    # PERSIST rawSub checkpoint BEFORE Prime!
+                    self.persistence.save_sub_analysis(project_id, sub_analysis)
+                    state["sub_analysis"] = sub_analysis
+                    now_sub_iso = datetime.now(timezone.utc).isoformat()
+                    state["timestamps"]["sub_analyzed_at"] = now_sub_iso
+                    state["timestamps"]["updated_at"] = now_sub_iso
+                    self.persistence.save_project(state)
+                    if callbacks and callbacks.on_sub_analysis:
+                        callbacks.on_sub_analysis(sub_analysis)
+
+                # Stage 2: Prime model (text analysis + original prompt + schema -> Final JSON)
+                if cancellation_token:
+                    cancellation_token.check_cancelled()
+
+                from toolrecap_v3.schemas.schema import get_project_schema
+                technical_schema = get_project_schema()
+
+                technical_metadata = {
+                    "project_id": state["project_id"],
+                    "sources": source_meta,
+                }
+
+                prime_prompt = (
+                    f"Original User Prompt:\n{state['prompt']}\n\n"
+                    f"Technical Metadata (Exact Source Files, Durations, Project ID):\n{json.dumps(technical_metadata, indent=2, ensure_ascii=False)}\n\n"
+                    f"Video Analysis from Sub Stage:\n{sub_analysis}\n\n"
+                    f"Technical Schema:\n{json.dumps(technical_schema, indent=2, ensure_ascii=False)}\n\n"
+                    "Generate the final recap JSON matching the schema based on the video analysis and user prompt."
+                )
 
                 raw_response = None
                 try:
-                    gw_result = self.gateway_client.submit_chat_analysis(
-                        sources=ordered_sources,
-                        prompt=state["prompt"],
-                        model=cfg.gateway_model,
+                    prime_result = self.gateway_client.submit_text_chat(
+                        prompt=prime_prompt,
+                        model=cfg.gateway_prime_model,
+                        reasoning_effort=cfg.gateway_prime_reasoning or None,
+                        expect_json=True,
                         cancellation_token=cancellation_token,
                     )
-                    raw_response = gw_result.raw_response
-                    parsed_json = gw_result.parsed_json
+                    raw_response = prime_result.raw_response
+                    parsed_json = prime_result.parsed_json
                 except CancelledError:
                     raise
                 except InvalidGatewayResponseError as e:

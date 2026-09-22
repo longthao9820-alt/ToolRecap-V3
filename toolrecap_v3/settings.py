@@ -50,9 +50,13 @@ class AppSettings:
     voice_style: str = ""
     voice_model: str = "omnivoice"
 
-    # AI Gateway
+    # AI Gateway (Dual-Stage: Sub for video analysis, Prime for synthesis)
     gateway_endpoint: str = "http://127.0.0.1:20128"
-    gateway_model: str = "ag/gemini-3.8-flash"
+    gateway_sub_model: str = "sub"
+    gateway_sub_reasoning: str = ""
+    gateway_prime_model: str = "prime"
+    gateway_prime_reasoning: str = ""
+    gateway_model: str = "sub"
     gateway_thinking: bool = False
 
     # Notifications (all defaults ON)
@@ -74,15 +78,36 @@ class AppSettings:
     content_type: str = "US_TV_SHOW"
     source_rights_status: str = "UNVERIFIED"
 
+    def __post_init__(self) -> None:
+        if self.gateway_sub_model and (not self.gateway_model or self.gateway_model == "sub"):
+            self.gateway_model = self.gateway_sub_model
+        elif self.gateway_model and not self.gateway_sub_model:
+            self.gateway_sub_model = self.gateway_model
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert settings to dictionary."""
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> AppSettings:
-        """Create AppSettings from dict, ignoring unknown or secret fields."""
+        """Create AppSettings from dict, safely migrating legacy gateway_model and thinking if needed."""
+        data_copy = dict(data)
+        # Migrate legacy single gateway_model to dual sub/prime defaults
+        if "gateway_model" in data_copy and "gateway_sub_model" not in data_copy:
+            old_model = data_copy.get("gateway_model")
+            if old_model:
+                data_copy["gateway_sub_model"] = old_model
+            if "gateway_prime_model" not in data_copy:
+                data_copy["gateway_prime_model"] = "prime"
+        if "gateway_sub_model" in data_copy and "gateway_model" not in data_copy:
+            data_copy["gateway_model"] = data_copy["gateway_sub_model"]
+        if "gateway_thinking" in data_copy:
+            if "gateway_sub_reasoning" not in data_copy and data_copy["gateway_thinking"]:
+                data_copy["gateway_sub_reasoning"] = "high"
+            if "gateway_prime_reasoning" not in data_copy and data_copy["gateway_thinking"]:
+                data_copy["gateway_prime_reasoning"] = "high"
         allowed = cls.__dataclass_fields__
-        filtered = {k: v for k, v in data.items() if k in allowed}
+        filtered = {k: v for k, v in data_copy.items() if k in allowed}
         return cls(**filtered)
 
 

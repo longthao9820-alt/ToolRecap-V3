@@ -13,7 +13,7 @@ Bạn có thể mở ứng dụng bằng một trong hai cách rất đơn giả
   `ToolRecapV3.exe`
 
 - **Cách 2 (Bản nén phát hành):**
-  Mở thư mục [release](release), giải nén tệp [ToolRecapV3-v3.0.1-windows-portable.zip](release/ToolRecapV3-v3.0.1-windows-portable.zip) ra bất kỳ đâu (ví dụ Desktop), rồi nhấp đúp vào `ToolRecapV3.exe` bên trong.
+  Mở thư mục [release](release), giải nén tệp [ToolRecapV3-v3.0.2-windows-portable.zip](release/ToolRecapV3-v3.0.2-windows-portable.zip) ra bất kỳ đâu (ví dụ Desktop), rồi nhấp đúp vào `ToolRecapV3.exe` bên trong.
 
 > **Ghi chú:** Ứng dụng đã tích hợp sẵn FFmpeg, FFprobe và bộ kiểm tra hợp lệ, không cần cài đặt thêm Python hay phần mềm phụ trợ bên ngoài.
 
@@ -23,10 +23,11 @@ Bạn có thể mở ứng dụng bằng một trong hai cách rất đơn giả
 
 Trước khi bấm bắt đầu tạo recap, hãy đảm bảo hai dịch vụ sau đang hoạt động:
 
-1. **AI Gateway (9router):**
-   - Dịch vụ cần chạy tại địa chỉ mặc định `http://127.0.0.1:20128`.
-   - Model mặc định: `ag/gemini-3.8-flash` (yêu cầu model hỗ trợ nhận diện video).
-   - Nhập API key trong cửa sổ **Cài đặt -> 1. AI Gateway**.
+1. **AI Gateway (9router — Kiến trúc Hai Giai đoạn Sub & Prime):**
+   - Dịch vụ chạy tại địa chỉ mặc định `http://127.0.0.1:20128`.
+   - **Giai đoạn 1 (Sub Model):** Phân tích video nguồn thành văn bản mô tả chi tiết, mặc định `sub` (hoặc `ag/gemini-3.8-flash`), có tùy chọn reasoning. Checkpoint phân tích được lưu ngay vào đĩa trước khi sang bước tiếp theo.
+   - **Giai đoạn 2 (Prime Model):** Tiếp nhận phân tích của Sub cùng chỉ dẫn kịch bản (prompt), metadata kỹ thuật và JSON schema để tổng hợp thành kịch bản Final JSON có cấu trúc, mặc định `prime` (hoặc `ag/gemini-3.8-flash`), có tùy chọn reasoning.
+   - Nhập API key trong cửa sổ **Cài đặt -> 1. AI Gateway**. Cả hai model đều có nút kiểm tra kết nối riêng.
 
 2. **VoiceStudio (Tạo giọng đọc):**
    - Chế độ Local: Chạy dịch vụ VoiceStudio tại `http://127.0.0.1:3900`.
@@ -42,24 +43,35 @@ Trước khi bấm bắt đầu tạo recap, hãy đảm bảo hai dịch vụ s
    - Bấm nút **"Chọn thư mục"** nếu bạn muốn tóm tắt nhiều tập trong cùng một thư mục. Ứng dụng sẽ tự động sắp xếp các tập theo thứ tự tự nhiên (tập 1 đến tập 10...) và chỉ lấy các tệp video trực tiếp trong thư mục đó, không quét lộn xộn các thư mục con bên trong.
 3. **Kiểm tra Cài đặt & Nhập Kịch bản (BẮT BUỘC):**
    - Bấm nút **"⚙ Cài đặt"** ở góc trên bên phải.
-   - **Tab 1 (AI Gateway):** Kiểm tra địa chỉ `http://127.0.0.1:20128` và điền API key.
+   - **Tab 1 (AI Gateway):** Kiểm tra địa chỉ `http://127.0.0.1:20128`, điền API key, cấu hình Sub model và Prime model kèm reasoning tùy chọn.
    - **Tab 2 (Kịch bản - Prompt) — BẮT BUỘC:** Nhập chỉ dẫn kịch bản bạn muốn AI tóm tắt (ví dụ: yêu cầu nội dung tập trung vào tình tiết nào, nhân vật nào, phong cách lời bình ra sao). *Lưu ý: Kịch bản là bắt buộc; các cơ chế xử lý ngoại lệ hình ảnh (visual exceptions), scanner, finalizer và bộ tự sửa lỗi (heuristic repair) của V2 đã hoàn toàn vắng mặt/bị loại bỏ. Phần mềm không tự ý chắp vá hay biên tập lại kịch bản nếu để trống.*
    - **Tab 3 (Giọng đọc):** Chọn giọng đọc (`alloy`, ...) và ngôn ngữ (`vi`, `en-US`, ...).
    - Bấm nút **"Lưu cài đặt"** để hoàn tất cấu hình.
 4. **Bắt đầu tạo video recap:**
    - Bấm nút **"BẮT ĐẦU"**.
-   - Ứng dụng sẽ tự động thực hiện toàn bộ quy trình: gửi video sang AI Gateway phân tích -> tạo kịch bản Final JSON -> lưu kịch bản vào ổ đĩa -> gọi VoiceStudio tạo giọng đọc -> cắt ghép video và trộn âm thanh bằng FFmpeg -> xuất ra video hoàn chỉnh.
+   - Ứng dụng sẽ tự động thực hiện toàn bộ quy trình: Sub model phân tích video -> lưu checkpoint Sub -> Prime model tổng hợp Final JSON -> lưu Final JSON vào ổ đĩa -> gọi VoiceStudio tạo giọng đọc -> cắt ghép video và trộn âm thanh bằng FFmpeg -> xuất ra video hoàn chỉnh.
 5. **Nhận kết quả:**
    - Bạn có thể thu nhỏ cửa sổ để làm việc khác. Khi hoàn tất, Windows sẽ hiện thông báo góc màn hình và phát âm thanh báo hiệu.
    - Bấm nút **"Mở thư mục xuất"** trên giao diện để mở ngay thư mục chứa các video recap đã dựng xong kèm phụ đề (`.mp4`, `.narration.srt`, `.original.srt`).
 
 ---
 
-## 4. Truyền phát video theo luồng (Streaming) & Giới hạn thực tế từ nhà cung cấp
+## 4. Truyền phát video theo luồng (Streaming), Kiến trúc Hai Giai đoạn & Giới hạn thực tế từ nhà cung cấp
 
-- **Không giới hạn cứng ở ứng dụng (No App Cap):** Khác với phiên bản cũ áp đặt giới hạn 500 MB cho mỗi tệp, ToolRecap V3.0.1 đã loại bỏ giới hạn cứng này (`DEFAULT_MAX_FILE_SIZE_BYTES = None`) và chuyển sang cơ chế truyền phát theo luồng (`StreamingChatPayload`) mã hóa base64 trực tiếp khi gửi request. Kiểm thử thực tế với tệp mẫu 550 MB chứng minh mức sử dụng bộ nhớ đỉnh (peak memory) chỉ khoảng ~0.30 MB.
+- **Không giới hạn cứng ở ứng dụng (No App Cap):** Khác với phiên bản cũ áp đặt giới hạn 500 MB cho mỗi tệp, ToolRecap V3.0.2 đã loại bỏ giới hạn cứng này (`DEFAULT_MAX_FILE_SIZE_BYTES = None`) và chuyển sang cơ chế truyền phát theo luồng (`StreamingChatPayload`) mã hóa base64 trực tiếp khi gửi request. Kiểm thử thực tế với tệp mẫu 550 MB chứng minh mức sử dụng bộ nhớ đỉnh (peak memory) chỉ khoảng ~0.30 MB.
+- **Kiến trúc Hai Giai đoạn (Two-Stage Sub/Prime Architecture):**
+  - Giai đoạn 1 (Sub): Truyền phát toàn bộ video nguồn tới Sub model để phân tích hình ảnh và thời gian dạng free-text. Kết quả được lưu lập tức vào `sub_analysis/<mã_dự_án>.txt` làm checkpoint an toàn.
+  - Giai đoạn 2 (Prime): Gửi văn bản phân tích từ Sub cùng prompt của người dùng, metadata kỹ thuật (tên file, độ dài ms) và technical schema tới Prime model để tạo Final JSON chuẩn xác, lưu tại `final/<mã_dự_án>.json`.
+  - Tái sử dụng checkpoint tối ưu: Nếu Prime thất bại, khi thử lại hệ thống tái sử dụng checkpoint Sub mà không cần phân tích lại video. Nếu bước dựng (render) thất bại, khi tiếp tục hệ thống tái sử dụng Final JSON với **0 lượt gọi AI** (cả Sub lẫn Prime đều không bị gọi lại).
+- **Bằng chứng thực nghiệm với fixture thực tế (`artifacts/live_dual_subprime/dual_subprime_evidence.json`):**
+  - Video mẫu 5.0s (`episode_sample.mp4`, 640x480, 217.417 byte).
+  - Sub model (`sub`) phân tích video thành công qua streaming.
+  - Prime model (`prime`) tạo cấu trúc Final JSON hợp lệ theo schema 3.0.
+  - VoiceStudio Local (`http://127.0.0.1:3900`, voice `alloy`, model `omnivoice`) tạo âm thanh WAV mono 24kHz (53.804 byte, 1.12s).
+  - FFmpeg dựng thành công video 1080p `Dual_Recap_Output.mp4` (442.794 byte, 5.0s, có âm thanh) kèm phụ đề `Dual_Recap_Output.narration.srt`.
+  - Tiếp tục dự án (Zero-AI Resume): Đã kiểm chứng chạy `resume_project` bỏ qua các video đã dựng với đúng 0 lần gọi Gateway.
 - **Giới hạn thực tế từ nhà cung cấp (Provider Actual Limits — Không tuyên bố vô hạn):** Mặc dù ứng dụng không còn giới hạn cứng ở phía client, các giới hạn thực tế từ phía hạ tầng AI Gateway và mô hình AI (9router / nhà cung cấp mô hình) vẫn luôn áp dụng (giới hạn kích thước payload HTTP của máy chủ, thời gian chờ mạng, giới hạn số lượng token và độ dài ngữ cảnh). Ứng dụng **không tuyên bố hỗ trợ kích thước vô hạn**.
-- **Lưu ý với toàn bộ mùa phim:** Nếu bạn xử lý thư mục nhiều tập có dung lượng hàng gigabyte (GB) hoặc phim 4K chưa nén vượt quá giới hạn của nhà cung cấp, hãy nén hoặc cắt ngắn phù hợp trước khi đưa vào ứng dụng.
+- **Lưu ý với toàn bộ mùa phim:** Do video được nhúng trực tiếp vào payload HTTP, các thư mục nhiều tập có dung lượng hàng gigabyte (GB) hoặc phim 4K chưa nén vượt quá giới hạn của nhà cung cấp không thể gửi cùng lúc trong một request duy nhất. Cần nén hoặc cắt ngắn phù hợp trước khi đưa vào ứng dụng.
 - **Hoàn toàn vắng mặt các module V2 cũ:** Các cơ chế xử lý ngoại lệ hình ảnh (visual exceptions), scanner, finalizer, candidate discovery, STT/Whisper, OCR và bộ tự động sửa kịch bản (heuristic repair) của V2 đều đã bị loại bỏ hoàn toàn khỏi hệ thống.
 
 ---
@@ -68,6 +80,7 @@ Trước khi bấm bắt đầu tạo recap, hãy đảm bảo hai dịch vụ s
 
 Tất cả dữ liệu làm việc, cấu hình và tệp tạm được lưu riêng biệt trong thư mục `%LOCALAPPDATA%\ToolRecapV3\` (thường là `C:\Users\<Tên_bạn>\AppData\Local\ToolRecapV3\`), không làm rác thư mục chứa video gốc của bạn:
 
+- `sub_analysis/`: Chứa văn bản phân tích video từ Sub model (`sub_analysis/<mã_dự_án>.txt`).
 - `final/`: Chứa các tệp kịch bản tóm tắt Final JSON đã phân tích thành công (`final/<mã_dự_án>.json`).
 - `raw/`: Chứa phản hồi thô nguyên bản từ AI Gateway (`raw/<mã_dự_án>.txt`) dùng để tra cứu hoặc xử lý sự cố.
 - `projects/`: Chứa trạng thái và lịch sử xử lý của từng dự án (`projects/<mã_dự_án>.json`).
